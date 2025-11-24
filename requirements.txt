@@ -1,0 +1,3 @@
+slack_bolt==1.25.0       # Slack Bolt framework
+slack_sdk==3.24.0        # Slack SDK for API interactions
+python-dotenv==1.0.0     # Load environment variables from .env
