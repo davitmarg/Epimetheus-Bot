@@ -1,4 +1,3 @@
-# bot/handlers.py
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 from bot.utils import format_message
