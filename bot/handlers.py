@@ -1,6 +1,7 @@
+# bot/handlers.py
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
-from bot.utils import format_message
+from bot.buffer import buffer  # <-- import the shared buffer instance
 from dotenv import load_dotenv
 import os
 
@@ -13,18 +14,16 @@ app = App(token=SLACK_BOT_TOKEN)
 
 
 @app.event("message")
-def handle_message_events(event, say):
-    print("Raw event:", event)
-    formatted = format_message(event)
-    print(f"! {formatted}")
+def handle_message(event, say):
+    # ignore bot messages
+    if event.get("bot_id"):
+        return
+
+    buffer.ingest(event)
+    print("Message ingested:", event.get("text", ""))
 
 
 def start_bot():
-    """Start the Slack bot using Socket Mode."""
     print("Starting Project Epimetheus bot...")
     handler = SocketModeHandler(app, SLACK_APP_TOKEN)
     handler.start()
-
-
-if __name__ == "__main__":
-    start_bot()
