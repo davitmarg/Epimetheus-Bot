@@ -1,20 +1,20 @@
-import json
-import os
-import redis
-from typing import Dict, Any, List, Tuple
+"""
+Redis Buffer
 
-REDIS_HOST = os.environ.get("REDIS_HOST", "localhost")
-REDIS_PORT = int(os.environ.get("REDIS_PORT", 6379))
-REDIS_DB = int(os.environ.get("REDIS_DB", 0))
+Handles message buffering and batching for the Slack bot.
+"""
+
+import json
+from typing import Dict, Any, Tuple
+from utils.db_utils import get_redis_client
 
 BATCH_SIZE = 50
+REDIS_QUEUE_KEY = "epimetheus:updater_queue"  # Queue for batches to be processed
 
 
 class RedisBuffer:
     def __init__(self):
-        self.client = redis.Redis(
-            host=REDIS_HOST, port=REDIS_PORT, db=REDIS_DB, decode_responses=True
-        )
+        self.client = get_redis_client()
 
     def _get_keys(self, team_id: str) -> Tuple[str, str, str, str]:
         base = f"epimetheus:{team_id}"
@@ -86,10 +86,12 @@ class RedisBuffer:
             self._send_to_updater(payload)
 
     def _send_to_updater(self, payload: Dict[str, Any]):
+        """Push batch payload to Redis queue for updater service to consume"""
         print(
             f"Dispatching batch for Team {payload['team_id']}: {len(payload['threads'])} active threads."
         )
-        # HTTP request to updater_service goes here
-
+        serialized_payload = json.dumps(payload)
+        print(f"Serialized payload: {serialized_payload}")
+        self.client.rpush(REDIS_QUEUE_KEY, serialized_payload)
 
 buffer = RedisBuffer()

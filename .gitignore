@@ -1,1 +1,125 @@
+# Environment variables
 .env
+.env.local
+.env.*.local
+
+.vscode/*
+.idea/*
+
+# Credentials and secrets
+credentials.json
+*.credentials.json
+*.key
+*.pem
+*.p12
+*.pfx
+*.secret
+secrets/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+.venv/
+
+# PyCharm
+.idea/
+
+# VS Code
+.vscode/
+*.code-workspace
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# pytest
+.pytest_cache/
+.hypothesis/
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# ChromaDB
+chroma_db/
+chromadb_data/
+
+# MongoDB
+mongodb_data/
+
+# Redis
+dump.rdb
+*.rdb
+
+# Docker
+docker-compose.override.yml
+
+# Logs
+*.log
+logs/
+*.log.*
+
+# OS files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# Temporary files
+*.tmp
+*.temp
+tmp/
+temp/
+
+# Test artifacts
+.coverage
+htmlcov/
+test-results/
+*.cover
+.coverage.*
+
+# Local development
+local/
+local_settings.py
+
+# Backup files
+*.bak
+*.backup
