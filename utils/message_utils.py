@@ -1,5 +1,6 @@
-# bot/utils.py
-
+"""
+Message formatting utilities
+"""
 
 def format_message(event: dict) -> str:
     """
@@ -15,3 +16,4 @@ def format_message(event: dict) -> str:
         formatted += f" (thread reply to {thread_ts})"
     formatted += f":\n{text}\n"
     return formatted
+
