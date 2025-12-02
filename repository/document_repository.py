@@ -9,7 +9,7 @@ import os
 import uuid
 from datetime import datetime
 from typing import Dict, Any, List, Optional
-from utils.db_utils import get_mongodb_db
+from utils.db_utils import get_mongodb_db, get_chroma_collection
 from repository.drive_repository import (
     list_documents_in_folder,
     search_documents_by_name,
@@ -21,6 +21,7 @@ class DocumentRepository:
     
     def __init__(self):
         self.db = get_mongodb_db()
+        self.collection = get_chroma_collection()
         if self.db is not None:
             self._init_collections()
     
@@ -36,9 +37,10 @@ class DocumentRepository:
         self.metadata_collection.create_index([("doc_id", 1)])
         self.metadata_collection.create_index([("folder_id", 1)])
 
-        # Drive file mapping collection
+        # Drive file mapping collection (flat documents with folder_id)
         self.mapping_collection = self.db["drive_file_mapping"]
-        self.mapping_collection.create_index([("type", 1)])
+        self.mapping_collection.create_index([("doc_id", 1)], unique=True)
+        self.mapping_collection.create_index([("folder_id", 1)])
 
     def save_version(self, doc_id: str, content: str, version_metadata: Dict[str, Any]) -> str:
         """Save a document version to MongoDB"""
@@ -208,41 +210,60 @@ class DocumentRepository:
             print(f"Error searching metadata: {e}")
             return []
     
-    # Drive File Mapping
-    
-    def get_drive_mapping(self) -> Dict[str, Any]:
-        """Get the Drive file mapping from MongoDB"""
+
+    def get_drive_mapping(self, folder_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Get all documents from the drive mapping collection, optionally filtered by folder_id"""
         if self.db is None:
-            return {}
+            return []
         
-        mapping = self.mapping_collection.find_one({"type": "drive_mapping"})
+        query = {}
+        if folder_id:
+            query["folder_id"] = folder_id
         
-        if mapping:
-            # Remove MongoDB _id field
-            mapping.pop("_id", None)
-            mapping.pop("type", None)
-        else:
-            mapping = {}
+        documents = []
+        for doc in self.mapping_collection.find(query):
+            # Remove MongoDB _id field and convert datetime
+            doc.pop("_id", None)
+            if isinstance(doc.get("synced_at"), datetime):
+                doc["synced_at"] = doc["synced_at"].isoformat()
+            if isinstance(doc.get("updated_at"), datetime):
+                doc["updated_at"] = doc["updated_at"].isoformat()
+            documents.append(doc)
         
-        return mapping
+        return documents
     
-    def update_drive_mapping(self, mapping: Dict[str, Any]) -> Dict[str, Any]:
-        """Update the Drive file mapping in MongoDB"""
+    def upsert_drive_document(self, doc_id: str, name: str, folder_id: str, 
+                             created_time: Optional[str] = None, 
+                             modified_time: Optional[str] = None) -> Dict[str, Any]:
+        """Insert or update a single document in the drive mapping collection"""
         if self.db is None:
             raise Exception("MongoDB connection not available")
         
-        # Ensure type field is set
-        mapping["type"] = "drive_mapping"
-        mapping["updated_at"] = datetime.utcnow()
+        document = {
+            "doc_id": doc_id,
+            "name": name,
+            "folder_id": folder_id,
+            "created_time": created_time,
+            "modified_time": modified_time,
+            "updated_at": datetime.utcnow()
+        }
         
-        # Upsert the mapping
+        # Upsert the document
         self.mapping_collection.replace_one(
-            {"type": "drive_mapping"},
-            mapping,
+            {"doc_id": doc_id},
+            document,
             upsert=True
         )
         
-        return mapping
+        return document
+    
+    def delete_drive_document(self, doc_id: str) -> bool:
+        """Delete a document from the drive mapping collection"""
+        if self.db is None:
+            return False
+        
+        result = self.mapping_collection.delete_one({"doc_id": doc_id})
+        return result.deleted_count > 0
     
     # Convenience methods combining Drive and MongoDB operations
     
@@ -275,7 +296,7 @@ class DocumentRepository:
         return documents
     
     def sync_drive_folder_to_mapping(self, folder_id: Optional[str] = None) -> Dict[str, Any]:
-        """Sync Drive folder contents to MongoDB mapping"""
+        """Sync Drive folder contents to MongoDB mapping (flat documents)"""
         if not folder_id:
             folder_id = os.environ.get("GOOGLE_DRIVE_FOLDER_ID")
         
@@ -283,17 +304,21 @@ class DocumentRepository:
             raise ValueError("GOOGLE_DRIVE_FOLDER_ID must be configured")
         
         # List documents from Drive
-        documents = list_documents_in_folder(folder_id)
+        drive_documents = list_documents_in_folder(folder_id)
         
-        # Build mapping structure
-        mapping = {
-            "folder_id": folder_id,
-            "documents": documents,
-            "synced_at": datetime.utcnow().isoformat()
-        }
-        
-        # Update document metadata for each document
-        for doc in documents:
+        # Upsert each document individually into the mapping collection
+        synced_docs = []
+        for doc in drive_documents:
+            document = self.upsert_drive_document(
+                doc_id=doc['id'],
+                name=doc['name'],
+                folder_id=folder_id,
+                created_time=doc.get('created_time'),
+                modified_time=doc.get('modified_time')
+            )
+            synced_docs.append(document)
+            
+            # Update document metadata for each document
             existing_meta = self.get_metadata(doc['id'])
             if not existing_meta:
                 self.save_metadata(
@@ -302,37 +327,102 @@ class DocumentRepository:
                     folder_id=folder_id
                 )
         
-        # Save mapping to MongoDB
-        self.update_drive_mapping(mapping)
-        return mapping
+        # Return summary
+        return {
+            "folder_id": folder_id,
+            "documents": synced_docs,
+            "document_count": len(synced_docs),
+            "synced_at": datetime.utcnow().isoformat()
+        }
     
     def get_documents_from_mapping(self, folder_id: Optional[str] = None) -> List[Dict[str, Any]]:
-        """Get documents from MongoDB mapping or Drive API"""
+        """Get documents from MongoDB mapping (flat collection) or Drive API"""
         if not folder_id:
             folder_id = os.environ.get("GOOGLE_DRIVE_FOLDER_ID")
         
         if not folder_id:
             return []
         
-        # First, try to get from MongoDB mapping
-        mapping = self.get_drive_mapping()
+        # First, try to get from MongoDB mapping (flat documents)
+        mapping_docs = self.get_drive_mapping(folder_id=folder_id)
         
-        if mapping and mapping.get("folder_id") == folder_id and mapping.get("documents"):
-            return mapping["documents"]
+        if mapping_docs:
+            # Convert to expected format (with 'id' field for compatibility)
+            documents = []
+            for doc in mapping_docs:
+                documents.append({
+                    "id": doc.get("doc_id"),
+                    "name": doc.get("name"),
+                    "created_time": doc.get("created_time"),
+                    "modified_time": doc.get("modified_time")
+                })
+            return documents
         
         # Fallback to querying Drive API directly
         documents = list_documents_in_folder(folder_id)
         
         # Update mapping for future use
         if documents:
-            mapping = {
-                "folder_id": folder_id,
-                "documents": documents,
-                "synced_at": datetime.utcnow().isoformat()
-            }
-            self.update_drive_mapping(mapping)
+            for doc in documents:
+                self.upsert_drive_document(
+                    doc_id=doc['id'],
+                    name=doc['name'],
+                    folder_id=folder_id,
+                    created_time=doc.get('created_time'),
+                    modified_time=doc.get('modified_time')
+                )
         
         return documents
+    
+    # Vector Database Operations
+    
+    def search_similar_documents(self, query_text: str, n_results: int = 3) -> Optional[Dict[str, Any]]:
+        """Search for similar documents using vector search"""
+        if not self.collection:
+            return None
+        
+        try:
+            results = self.collection.query(
+                query_texts=[query_text],
+                n_results=n_results
+            )
+            return results
+        except Exception as e:
+            print(f"Error searching similar documents: {e}")
+            return None
+    
+    def delete_document_chunks(self, doc_id: str) -> bool:
+        """Delete all chunks for a document from vector database"""
+        if not self.collection:
+            print("Warning: ChromaDB collection not available, skipping chunk deletion")
+            return False
+        
+        try:
+            self.collection.delete(where={"doc_id": doc_id})
+            return True
+        except Exception as e:
+            print(f"Error deleting document chunks: {e}")
+            return False
+    
+    def add_document_chunks(self, doc_id: str, chunks: List[str]) -> bool:
+        """Add document chunks to vector database"""
+        if not self.collection:
+            print("Warning: ChromaDB collection not available, skipping chunk addition")
+            return False
+        
+        if not chunks:
+            return False
+        
+        try:
+            self.collection.add(
+                documents=chunks,
+                ids=[f"{doc_id}_chunk_{i}" for i in range(len(chunks))],
+                metadatas=[{"doc_id": doc_id, "chunk_index": i} for i in range(len(chunks))]
+            )
+            return True
+        except Exception as e:
+            print(f"Error adding document chunks: {e}")
+            return False
 
 
 _document_repository = None

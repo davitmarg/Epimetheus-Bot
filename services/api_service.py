@@ -17,12 +17,10 @@ load_dotenv()
 app = FastAPI(title="Epimetheus API Service")
 
 from services.updater_service import (
-    document_stacks,
     process_document_update,
     list_document_versions,
     load_document_version,
     update_vector_db,
-    CHAR_THRESHOLD,
     GOOGLE_DRIVE_FOLDER_ID,
 )
 
@@ -59,22 +57,22 @@ class UpdateMetadataRequest(BaseModel):
 
 @app.post("/api/v1/trigger")
 async def manual_trigger(request: ManualTriggerRequest):
-    """Manually trigger document generation"""
+    """Verify document exists (manual trigger not needed since messages are processed immediately)"""
     doc_id = request.doc_id
     
     if not doc_id:
         raise HTTPException(status_code=400, detail="doc_id required")
     
-    if doc_id not in document_stacks:
-        raise HTTPException(status_code=404, detail=f"Document {doc_id} not found in stacks")
-    
-    # Process synchronously for API response
-    process_document_update(doc_id, force=True)
+    # Verify document exists
+    try:
+        content = get_document_content(doc_id)
+    except Exception as e:
+        raise HTTPException(status_code=404, detail=f"Document {doc_id} not found: {str(e)}")
     
     return {
         "status": "success",
         "doc_id": doc_id,
-        "message": "Document update completed"
+        "message": "Document exists. Messages are processed immediately when received."
     }
 
 
@@ -110,14 +108,6 @@ async def revert_to_version(doc_id: str, version_id: str):
         update_document_content(doc_id, content)
         update_vector_db(doc_id, content)
         
-        # Reset stack
-        if doc_id in document_stacks:
-            document_stacks[doc_id] = {
-                'char_count': 0,
-                'messages': [],
-                'last_version': version_id
-            }
-        
         return {
             "status": "success",
             "message": f"Document reverted to version {version_id}",
@@ -129,19 +119,11 @@ async def revert_to_version(doc_id: str, version_id: str):
 
 @app.get("/api/v1/status")
 async def get_status():
-    """Get service status and document stack information"""
+    """Get service status"""
     status = {
         "service": "Epimetheus API Service",
-        "documents": {}
+        "message": "Service is running. Messages are processed immediately without batching."
     }
-    
-    for doc_id, stack in document_stacks.items():
-        status["documents"][doc_id] = {
-            "char_count": stack['char_count'],
-            "message_count": len(stack['messages']),
-            "threshold": CHAR_THRESHOLD,
-            "last_version": stack.get('last_version')
-        }
     
     return status
 
@@ -274,14 +256,16 @@ async def get_all_metadata(folder_id: Optional[str] = Query(None, description="F
 
 
 @app.get("/api/v1/drive/mapping")
-async def get_drive_mapping():
-    """Get the current Drive file mapping from MongoDB"""
+async def get_drive_mapping(folder_id: Optional[str] = Query(None, description="Filter by folder ID")):
+    """Get all documents from the Drive mapping collection (flat structure)"""
     try:
         repo = get_document_repository()
-        mapping = repo.get_drive_mapping()
+        documents = repo.get_drive_mapping(folder_id=folder_id)
         return {
             "status": "success",
-            "mapping": mapping
+            "documents": documents,
+            "count": len(documents),
+            "folder_id": folder_id
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error retrieving mapping: {str(e)}")
@@ -289,32 +273,39 @@ async def get_drive_mapping():
 
 @app.post("/api/v1/drive/mapping/sync")
 async def sync_drive_mapping(folder_id: Optional[str] = Query(None, description="Folder ID to sync (defaults to configured folder)")):
-    """Sync Drive folder contents to MongoDB mapping"""
+    """Sync Drive folder contents to MongoDB mapping (flat documents)"""
     try:
-        mapping = sync_drive_folder_to_mapping(folder_id)
+        result = sync_drive_folder_to_mapping(folder_id)
         return {
             "status": "success",
             "message": "Drive folder synced successfully",
-            "mapping": mapping,
-            "document_count": len(mapping.get("documents", []))
+            "folder_id": result.get("folder_id"),
+            "document_count": result.get("document_count", 0),
+            "synced_at": result.get("synced_at")
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error syncing Drive folder: {str(e)}")
 
 
-@app.put("/api/v1/drive/mapping")
-async def update_mapping(mapping: Dict[str, Any]):
-    """Manually update the Drive file mapping"""
+@app.put("/api/v1/drive/mapping/document")
+async def update_drive_document(doc_id: str = Query(..., description="Document ID"),
+                                name: str = Query(..., description="Document name"),
+                                folder_id: str = Query(..., description="Folder ID")):
+    """Manually update a single document in the Drive mapping"""
     try:
         repo = get_document_repository()
-        updated_mapping = repo.update_drive_mapping(mapping)
+        document = repo.upsert_drive_document(
+            doc_id=doc_id,
+            name=name,
+            folder_id=folder_id
+        )
         return {
             "status": "success",
-            "message": "Mapping updated successfully",
-            "mapping": updated_mapping
+            "message": "Document updated successfully",
+            "document": document
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error updating mapping: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error updating document: {str(e)}")
 
 
 @app.get("/health")

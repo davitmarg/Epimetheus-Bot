@@ -20,6 +20,9 @@ REDIS_HOST = os.environ.get("REDIS_HOST", "localhost")
 REDIS_PORT = int(os.environ.get("REDIS_PORT", 6379))
 REDIS_DB = int(os.environ.get("REDIS_DB", 0))
 
+# Redis key constants
+REDIS_QUEUE_KEY = "epimetheus:updater_queue"  # Queue for batches to be processed
+
 # MongoDB configuration
 MONGODB_HOST = os.environ.get("MONGODB_HOST", "localhost")
 MONGODB_PORT = int(os.environ.get("MONGODB_PORT", 27017))
@@ -69,6 +72,7 @@ def get_mongodb_client() -> MongoClient:
             if MONGODB_USERNAME and MONGODB_PASSWORD:
                 # Use MongoDB connection string format: mongodb://username:password@host:port/database
                 connection_uri = f"mongodb://{MONGODB_USERNAME}:{MONGODB_PASSWORD}@{MONGODB_HOST}:{MONGODB_PORT}/{MONGODB_DATABASE}?authSource=admin"
+                print('Using MongoDB connection string: ', connection_uri)
                 _mongodb_client = MongoClient(
                     connection_uri,
                     serverSelectionTimeoutMS=5000

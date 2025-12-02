@@ -80,6 +80,10 @@ services:
       - SLACK_APP_TOKEN=${SLACK_APP_TOKEN}
       - GOOGLE_CREDENTIALS_PATH=/app/credentials.json
       - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL:-}
+      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4}
+      - OPENROUTER_REFERER=${OPENROUTER_REFERER:-https://github.com/epimetheus-bot}
+      - OPENROUTER_TITLE=${OPENROUTER_TITLE:-Epimetheus Bot}
     volumes:
       - ./chroma_db:/app/chroma_db
       - ./credentials.json:/app/credentials.json:ro

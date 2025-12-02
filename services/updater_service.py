@@ -1,8 +1,8 @@
 """
 The Archivist (Updater Service)
 
-This service consumes message batches from Redis, stacks them on existing documents,
-and generates new document versions when character thresholds are reached.
+This service consumes messages from Redis and immediately processes them,
+updating documents with each message.
 
 Supports multiple dynamic documents in a Google Drive folder.
 """
@@ -17,7 +17,7 @@ from dotenv import load_dotenv
 # Import database utilities
 from utils.db_utils import (
     get_redis_client,
-    get_chroma_collection
+    REDIS_QUEUE_KEY
 )
 
 # Import repositories
@@ -27,30 +27,28 @@ from repository.drive_repository import (
     create_document
 )
 from repository.document_repository import get_document_repository
-from repository.document_repository import get_documents_from_mapping
+from repository.slack_repository import send_document_update_notification
 
 load_dotenv()
 
 # Configuration
 GOOGLE_DRIVE_FOLDER_ID = os.environ.get("GOOGLE_DRIVE_FOLDER_ID")
-CHAR_THRESHOLD = int(os.environ.get("CHAR_THRESHOLD", 10000))
-REDIS_QUEUE_KEY = "epimetheus:updater_queue"  # Queue for batches to be processed
 
-# Initialize clients
+# Initialize OpenAI client (supports OpenRouter)
+openai_base_url = os.environ.get("OPENAI_BASE_URL")
+openai_api_key = os.environ.get("OPENAI_API_KEY")
+openai_model = os.environ.get("OPENAI_MODEL", "gpt-4")
+
 openai_client = OpenAI(
-    base_url=os.environ.get("OPENAI_BASE_URL", None),
-    api_key=os.environ.get("OPENAI_API_KEY"),
+    base_url=openai_base_url,
+    api_key=openai_api_key,
 )
 
 # Initialize database connections using utils
 redis_client = get_redis_client()
-collection = get_chroma_collection()
 
 # Initialize document repository
 document_repo = get_document_repository()
-
-# In-memory state for character tracking per document
-document_stacks: Dict[str, Dict[str, Any]] = {}  # doc_id -> {char_count, messages, last_version}
 
 
 def determine_target_documents(messages: List[Dict[str, Any]], team_id: str) -> List[str]:
@@ -66,17 +64,14 @@ def determine_target_documents(messages: List[Dict[str, Any]], team_id: str) -> 
     Returns a list of document IDs.
     """
     # Strategy 1: Use vector search to find most relevant documents
-    if collection and messages:
+    if messages:
         # Combine all message text
         combined_text = " ".join([msg.get('text', '') for msg in messages])
         
         if combined_text.strip():
             try:
                 # Search for similar content in vector DB
-                results = collection.query(
-                    query_texts=[combined_text],
-                    n_results=3
-                )
+                results = document_repo.search_similar_documents(combined_text, n_results=3)
                 
                 if results and results.get('ids') and results['ids'][0]:
                     # Extract unique doc_ids from results
@@ -99,12 +94,12 @@ def determine_target_documents(messages: List[Dict[str, Any]], team_id: str) -> 
     if GOOGLE_DRIVE_FOLDER_ID:
         try:
             # Get documents from mapping or list from folder
-            docs = get_documents_from_mapping(GOOGLE_DRIVE_FOLDER_ID)
+            docs = document_repo.get_documents_from_mapping(GOOGLE_DRIVE_FOLDER_ID)
             if docs:
                 # For now, return all documents (could be filtered by relevance)
                 return [doc['id'] for doc in docs]
         except Exception as e:
-            print(f"Warning: Could not list documents in folder: {e}")
+            print(f"Drive Warning: Could not list documents in folder: {e}")
     
     # Last resort: create a default document
     if GOOGLE_DRIVE_FOLDER_ID:
@@ -116,7 +111,7 @@ def determine_target_documents(messages: List[Dict[str, Any]], team_id: str) -> 
             )
             return [default_doc['id']]
         except Exception as e:
-            print(f"Error creating default document: {e}")
+            print(f"Drive Warning: Error creating default document: {e}")
     
     return []
 
@@ -161,29 +156,14 @@ def chunk_document(content: str, chunk_size: int = 1000) -> List[str]:
 
 def update_vector_db(doc_id: str, content: str):
     """Update vector database with document chunks"""
-    if not collection:
-        print("Warning: ChromaDB collection not available, skipping vector update")
-        return
-
     chunks = chunk_document(content)
     
     # Delete old chunks for this document
-    try:
-        collection.delete(where={"doc_id": doc_id})
-    except Exception:
-        # Collection might not exist or have no chunks yet
-        pass
+    document_repo.delete_document_chunks(doc_id)
     
     # Add new chunks
     if chunks:
-        try:
-            collection.add(
-                documents=chunks,
-                ids=[f"{doc_id}_chunk_{i}" for i in range(len(chunks))],
-                metadatas=[{"doc_id": doc_id, "chunk_index": i} for i in range(len(chunks))]
-            )
-        except Exception as e:
-            print(f"Error updating vector DB: {e}")
+        document_repo.add_document_chunks(doc_id, chunks)
 
 
 def generate_document_update(old_content: str, new_messages: List[Dict[str, Any]]) -> str:
@@ -220,7 +200,7 @@ Return ONLY the updated document content, without any explanations or markdown f
 
     try:
         response = openai_client.chat.completions.create(
-            model="gpt-4",
+            model=openai_model,
             messages=[
                 {"role": "system", "content": "You are a technical documentation expert."},
                 {"role": "user", "content": prompt}
@@ -234,66 +214,151 @@ Return ONLY the updated document content, without any explanations or markdown f
         raise Exception(f"Error generating document update: {str(e)}")
 
 
-def process_document_update(doc_id: str, force: bool = False):
-    """Process document update if threshold reached or forced"""
-    if doc_id not in document_stacks:
-        return
+def generate_change_summary(old_content: str, new_content: str, new_messages: List[Dict[str, Any]]) -> str:
+    """Use ChatGPT to generate a concise summary of document changes"""
+    if not openai_client:
+        return "Document updated successfully."
     
-    stack = document_stacks[doc_id]
-    char_count = stack['char_count']
+    # Format messages for context
+    message_context = []
+    for msg in new_messages:
+        user = msg.get('user', 'unknown')
+        text = msg.get('text', '')
+        message_context.append(f"{user}: {text}")
     
-    if not force and char_count < CHAR_THRESHOLD:
-        return
+    messages_text = "\n".join(message_context[:5])  # Limit to first 5 messages for summary
+    
+    prompt = f"""You are an AI assistant that summarizes changes made to technical documentation.
+
+Original Document Content (first 500 chars):
+{old_content[:500]}
+
+Updated Document Content (first 500 chars):
+{new_content[:500]}
+
+New Information from Slack Conversations:
+{messages_text}
+
+Please generate a brief, concise summary (2-3 sentences) describing what changed in the document based on the new information. Focus on:
+- What new information was added
+- What sections were updated
+- Key changes or improvements
+
+Return ONLY the summary text, without any formatting or markdown."""
+
+    try:
+        response = openai_client.chat.completions.create(
+            model=openai_model,
+            messages=[
+                {"role": "system", "content": "You are a technical documentation expert who writes clear, concise summaries."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.5,
+            max_tokens=200
+        )
+        
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        print(f"Warning: Error generating change summary: {str(e)}")
+        return "Document updated successfully."
+
+
+def process_document_update(doc_id: str, messages: List[Dict[str, Any]], trigger_type: str = "automatic") -> Dict[str, Any]:
+    """
+    Process document update immediately with the given messages
+    
+    Returns:
+        Dict with 'success' (bool), 'doc_id', 'doc_name', 'message_count', 'version_id', 'change_summary', 'error' (optional)
+    """
+    result = {
+        "success": False,
+        "doc_id": doc_id,
+        "doc_name": None,
+        "message_count": len(messages),
+        "version_id": None,
+        "change_summary": None,
+        "error": None
+    }
+    
+    if not messages:
+        result["error"] = "No messages provided"
+        print(f"No messages provided for document {doc_id}")
+        return result
+    
+    # Get document name from metadata
+    try:
+        metadata = document_repo.get_metadata(doc_id)
+        result["doc_name"] = metadata.get("name", "Unknown Document") if metadata else "Unknown Document"
+    except Exception as e:
+        result["doc_name"] = "Unknown Document"
+        print(f"Warning: Could not get document metadata: {e}")
     
     # Get current document content
     try:
         old_content = get_document_content(doc_id)
     except Exception as e:
+        result["error"] = f"Error reading document: {str(e)}"
         print(f"Error reading document {doc_id}: {e}")
-        return
+        return result
     
     # Generate new content
     try:
-        new_content = generate_document_update(old_content, stack['messages'])
+        new_content = generate_document_update(old_content, messages)
     except Exception as e:
+        result["error"] = f"Error generating update: {str(e)}"
         print(f"Error generating update for {doc_id}: {e}")
-        return
+        return result
+    
+    # Generate change summary
+    try:
+        result["change_summary"] = generate_change_summary(old_content, new_content, messages)
+    except Exception as e:
+        print(f"Warning: Error generating change summary: {e}")
+        result["change_summary"] = "Document updated successfully."
+    
+    # Calculate metadata
+    char_count = sum(len(msg.get('text', '')) for msg in messages)
     
     # Save version before update
     version_metadata = {
         "char_count": char_count,
-        "message_count": len(stack['messages']),
-        "trigger_type": "manual" if force else "threshold"
+        "message_count": len(messages),
+        "trigger_type": trigger_type
     }
-    version_id = save_document_version(doc_id, old_content, version_metadata)
+    try:
+        version_id = save_document_version(doc_id, old_content, version_metadata)
+        result["version_id"] = version_id
+    except Exception as e:
+        result["error"] = f"Error saving version: {str(e)}"
+        print(f"Error saving version for {doc_id}: {e}")
+        return result
     
     # Update Google Doc
     try:
         update_document_content(doc_id, new_content)
     except Exception as e:
+        result["error"] = f"Error updating Google Doc: {str(e)}"
         print(f"Error updating Google Doc {doc_id}: {e}")
-        return
+        return result
     
     # Update vector database
     try:
         update_vector_db(doc_id, new_content)
     except Exception as e:
-        print(f"Error updating vector DB for {doc_id}: {e}")
+        # Don't fail the update if vector DB fails, just log it
+        print(f"Warning: Error updating vector DB for {doc_id}: {e}")
     
-    # Reset stack
-    document_stacks[doc_id] = {
-        'char_count': 0,
-        'messages': [],
-        'last_version': version_id
-    }
-    
-    print(f"✓ Successfully updated document {doc_id} (version {version_id})")
+    result["success"] = True
+    print(f"✓ Successfully updated document {doc_id} (version {version_id}) with {len(messages)} message(s)")
+    return result
 
 
 def ingest_messages(payload: Dict[str, Any]):
-    """Process message batches from Redis queue"""
+    """Process messages from Redis queue immediately"""
     team_id = payload.get('team_id')
     threads = payload.get('threads', [])
+    channel = payload.get('channel')  # Channel for Slack notification
+    thread_ts = payload.get('thread_ts')  # Thread timestamp for Slack notification
     
     if not threads:
         return
@@ -311,80 +376,119 @@ def ingest_messages(payload: Dict[str, Any]):
     
     if not target_doc_ids:
         print("Warning: No target documents found for messages")
+        # Send notification about failure if channel/thread available
+        if channel and thread_ts:
+            send_document_update_notification(
+                channel=channel,
+                thread_ts=thread_ts,
+                doc_id="",
+                doc_name="Unknown",
+                message_count=len(all_messages),
+                success=False,
+                error_message="No target documents found for messages"
+            )
         return
     
-    # Distribute messages to target documents
-    # For now, distribute evenly across documents
-    # (Could be enhanced with smarter routing)
-    messages_per_doc = len(all_messages) // len(target_doc_ids)
-    remainder = len(all_messages) % len(target_doc_ids)
+    # Process each message immediately - assign to first target document
+    doc_id = target_doc_ids[0]
     
-    message_idx = 0
-    for i, doc_id in enumerate(target_doc_ids):
-        # Initialize stack if needed
-        if doc_id not in document_stacks:
-            document_stacks[doc_id] = {
-                'char_count': 0,
-                'messages': [],
-                'last_version': None
-            }
-        
-        # Assign messages to this document
-        doc_message_count = messages_per_doc + (1 if i < remainder else 0)
-        doc_messages = all_messages[message_idx:message_idx + doc_message_count]
-        message_idx += doc_message_count
-        
-        # Add messages to stack
-        for message in doc_messages:
-            text = message.get('text', '')
-            char_count = len(text)
-            
-            document_stacks[doc_id]['char_count'] += char_count
-            document_stacks[doc_id]['messages'].append(message)
-        
-        # Check if threshold reached for this document
-        stack = document_stacks[doc_id]
-        if stack['char_count'] >= CHAR_THRESHOLD:
-            process_document_update(doc_id, force=False)
-        
-        print(
-            f"Processed batch for doc {doc_id}: "
-            f"{len(doc_messages)} messages, "
-            f"char_count: {stack['char_count']}/{CHAR_THRESHOLD}"
+    # Process update immediately with all messages
+    result = process_document_update(doc_id, all_messages, trigger_type="automatic")
+    
+    # Send Slack notification if channel and thread_ts are available
+    if channel and thread_ts:
+        send_document_update_notification(
+            channel=channel,
+            thread_ts=thread_ts,
+            doc_id=result["doc_id"],
+            doc_name=result["doc_name"] or "Unknown Document",
+            message_count=result["message_count"],
+            success=result["success"],
+            error_message=result.get("error"),
+            change_summary=result.get("change_summary")
         )
+    
+    if result["success"]:
+        print(f"✓ Processed {len(all_messages)} message(s) for doc {doc_id}")
+    else:
+        print(f"✗ Failed to process {len(all_messages)} message(s) for doc {doc_id}: {result.get('error')}")
 
 
 def consume_from_redis():
-    """Consume batches from Redis queue and process them"""
+    """Consume messages from Redis queue pushed by RedisBuffer"""
     print(f"Starting Redis consumer on queue: {REDIS_QUEUE_KEY}")
+    print(f"Waiting for batches from RedisBuffer...")
+    
+    # Verify Redis connection and queue status
+    try:
+        redis_client.ping()
+        queue_length = redis_client.llen(REDIS_QUEUE_KEY)
+        print(f"✓ Redis connected. Queue '{REDIS_QUEUE_KEY}' length: {queue_length}")
+        if queue_length > 0:
+            print(f"  Found {queue_length} message(s) already in queue")
+    except Exception as e:
+        print(f"✗ Redis connection check failed: {e}")
+    
+    last_heartbeat = time.time()
+    heartbeat_interval = 30  # Print heartbeat every 30 seconds
     
     while True:
         try:
             # Blocking pop from queue (wait up to 1 second)
+            # blpop returns (key, value) tuple or None if timeout
             result = redis_client.blpop(REDIS_QUEUE_KEY, timeout=1)
-            print(f"Received result: {result}")
             if result:
-                _, payload_json = result
-                payload = json.loads(payload_json)
-                print(f"Received payload: {payload}")
-                ingest_messages(payload)
+                # result is a tuple: (key, value)
+                queue_key, payload_json = result
+                
+                try:
+                    payload = json.loads(payload_json)
+                    team_id = payload.get('team_id', 'unknown')
+                    thread_count = len(payload.get('threads', []))
+                    
+                    total_messages = sum(len(t.get('messages', [])) for t in payload.get('threads', []))
+                    print(f"✓ Received message(s) for team {team_id}: {thread_count} thread(s), {total_messages} message(s)")
+                    ingest_messages(payload)
+                    print(f"✓ Successfully processed message(s) for team {team_id}")
+                    
+                except json.JSONDecodeError as e:
+                    print(f"✗ Error decoding JSON payload: {e}")
+                    print(f"  Raw payload: {payload_json[:200]}...")
+                    continue
+                except Exception as e:
+                    print(f"✗ Error processing batch: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    continue
             else:
                 # No message available, continue polling
+                # Print periodic heartbeat to show service is still running
+                current_time = time.time()
+                if current_time - last_heartbeat >= heartbeat_interval:
+                    queue_length = redis_client.llen(REDIS_QUEUE_KEY)
+                    print(f"⏳ Waiting for messages on queue: {REDIS_QUEUE_KEY} (current length: {queue_length})")
+                    last_heartbeat = current_time
                 time.sleep(0.1)
                 
-        except json.JSONDecodeError as e:
-            print(f"Error decoding JSON payload: {e}")
         except Exception as e:
             error_str = str(e).lower()
             if "connection" in error_str or "connectionerror" in error_str:
-                print(f"Redis connection error: {e}. Retrying in 5 seconds...")
+                print(f"✗ Redis connection error: {e}. Retrying in 5 seconds...")
                 time.sleep(5)
+                # Try to reconnect
+                try:
+                    redis_client.ping()
+                    print(f"✓ Redis connection restored")
+                except:
+                    pass
             else:
-                print(f"Error processing batch: {e}")
+                print(f"✗ Unexpected error in consume loop: {e}")
+                import traceback
+                traceback.print_exc()
                 time.sleep(1)
 
 
 def start_updater_service():
     """Start the updater service consumer"""
-    print("Starting Epimetheus Updater Service (Redis Consumer)...")
+    print("Starting Epimetheus Updater Service (Redis Consumer)...")    
     consume_from_redis()

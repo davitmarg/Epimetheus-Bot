@@ -49,10 +49,10 @@ if __name__ == "__main__":
             start_bot_service()
         elif service == "updater":
             print("Starting Project Epimetheus Updater Service only...")
+            initalize()
             start_updater_service()
         elif service == "api":
             print("Starting Project Epimetheus API Service on http://0.0.0.0:8000")
-            initalize()
             uvicorn.run(api_app, host="0.0.0.0", port=8000, log_level="info")
         else:
             print(f"Unknown service: {service}")
