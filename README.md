@@ -24,8 +24,8 @@ graph TB
     end
     
     Slack -->|Message Events| Bot
-    Bot -->|Push Batches| Redis
-    Redis -->|Consume Batches| Updater
+    Bot -->|Push Messages| Redis
+    Redis -->|Consume Messages| Updater
     API -->|Query/Trigger| Updater
     Updater -->|Read Current Doc| GoogleDocs
     Updater -->|Store Chunks| ChromaDB
@@ -50,26 +50,18 @@ sequenceDiagram
     
     Slack->>Bot: New Message Event
     Bot->>Bot: Filter Bot Messages
-    Bot->>Redis: Ingest Message<br/>(Thread ID, Content)
-    Redis->>Redis: Track Thread & Count<br/>Chars/Messages
-    
-    alt Threshold Reached<br/>(50 msgs OR 10k chars)
-        Bot->>Redis: Push Batch to Queue<br/>(epimetheus:updater_queue)
-        Redis->>Updater: Consume Batch<br/>(Blocking Pop)
-        Updater->>Updater: Stack Messages<br/>on Document State
-        
-        alt Char Threshold Reached<br/>(10k chars)
-            Updater->>GoogleDocs: Read Current Document
-            GoogleDocs-->>Updater: Document Content
-            Updater->>Updater: Prepare Context<br/>(Old Doc + New Messages)
-            Updater->>OpenAI: Generate Updated Document
-            OpenAI-->>Updater: New Document Content
-            Updater->>MongoDB: Save Version<br/>(Old Content + Metadata)
-            Updater->>GoogleDocs: Update Document<br/>(New Content)
-            Updater->>ChromaDB: Store Document Chunks<br/>(For RAG)
-            Updater->>Updater: Reset Stack
-        end
-    end
+    Bot->>Redis: Push Message to Queue<br/>(epimetheus:updater_queue)
+    Redis->>Updater: Consume Message<br/>(Blocking Pop)
+    Updater->>Updater: Determine Target Document<br/>(Vector Search)
+    Updater->>GoogleDocs: Read Current Document
+    GoogleDocs-->>Updater: Document Content
+    Updater->>Updater: Prepare Context<br/>(Old Doc + New Message)
+    Updater->>OpenAI: Generate Updated Document
+    OpenAI-->>Updater: New Document Content
+    Updater->>MongoDB: Save Version<br/>(Old Content + Metadata)
+    Updater->>GoogleDocs: Update Document<br/>(New Content)
+    Updater->>ChromaDB: Store Document Chunks<br/>(For RAG)
+    Updater->>Slack: Send Update Notification<br/>(Optional)
     
     Note over Updater,MongoDB: Manual Operations Available:<br/>- Trigger Update<br/>- List Versions<br/>- Revert to Version
 ```
@@ -99,8 +91,8 @@ graph LR
     end
     
     A -->|Event Stream| B
-    B -->|Buffer| C
-    C -->|Batch Dispatch| D
+    B -->|Immediate Dispatch| C
+    C -->|Message Queue| D
     D -->|Store Chunks| E
     D -->|Save Versions| F
     D -->|Generate Content| G
@@ -116,20 +108,19 @@ The system consists of three main services and a repository layer:
 
 **1. Bot Service** (`services/bot_service/`)
 - Listens to Slack message events
-- Organizes messages by thread
-- Buffers messages in Redis using `RedisBuffer`
-- Pushes batches to Redis queue when thresholds are reached:
-  - **Message count**: 50 messages (configurable via `BATCH_SIZE`)
-  - **Character count**: 10,000 characters (configurable via `CHAR_THRESHOLD`)
+- Filters out bot messages to prevent loops
+- Immediately dispatches each message to Redis queue for processing
+- Uses `BotBuffer` to handle message ingestion and queueing
 
 **2. Updater Service** (`services/updater_service.py`)
-- Consumes message batches from Redis queue
-- Stacks new messages on existing documents
-- Generates new document versions when character threshold is reached
-- Uses OpenAI GPT-4 to intelligently merge new information
-- Routes messages to documents using vector search (ChromaDB)
+- Consumes messages from Redis queue (one at a time)
+- Processes each message immediately upon receipt
+- Determines target document(s) using vector search (ChromaDB)
+- Generates updated document versions using OpenAI GPT-4
+- Intelligently merges new information with existing document content
 - Maintains version history with revert capability
 - Stores document chunks in ChromaDB for RAG context
+- Sends Slack notifications when documents are updated
 
 **3. API Service** (`services/api_service.py`)
 - Provides REST API endpoints for managing documents
@@ -504,32 +495,36 @@ The API Service exposes the following endpoints:
 - `GET /api/v1/versions/{doc_id}` - List all document versions
 - `GET /api/v1/versions/{doc_id}/{version_id}` - Get specific version
 - `POST /api/v1/revert/{doc_id}/{version_id}` - Revert to previous version
-- `GET /api/v1/status` - Get service status and document stack information
+- `GET /api/v1/status` - Get service status information
 - `GET /health` - Health check endpoint
 
 ## How It Works
 
-1. **Message Ingestion**: The Bot listens to Slack channels and ingests messages into Redis, organized by thread.
+1. **Message Ingestion**: The Bot listens to Slack channels and receives message events in real-time.
 
-2. **Batching**: Messages are batched until either:
-   - 50 messages are received, OR
-   - 10,000 characters are accumulated
+2. **Immediate Dispatch**: Each message is immediately pushed to a Redis queue (`epimetheus:updater_queue`) for processing. No batching or threshold waiting.
 
-3. **Dispatching**: When a threshold is reached, the Bot pushes the batch to a Redis queue (`epimetheus:updater_queue`).
+3. **Message Consumption**: The Updater Service consumes messages from the Redis queue using blocking pop operations, processing them one at a time.
 
-4. **Consuming**: The Updater Service consumes batches from the Redis queue using blocking pop operations.
+4. **Document Routing**: The Updater Service determines which document(s) should receive the message using:
+   - Vector similarity search in ChromaDB (primary method)
+   - Fallback to documents in the Drive folder mapping
+   - Creation of a default document if none exist
 
-5. **Stacking**: The Updater Service stacks new messages on top of the existing document state.
+5. **Document Update**: For each message, the system:
+   - Reads the current document content from Google Docs
+   - Prepares context combining the existing document and new message
+   - Uses OpenAI GPT-4 to generate an updated document that:
+     - Preserves existing valuable information
+     - Integrates new information from the Slack message
+     - Maintains proper formatting and structure
+     - Removes outdated information when appropriate
 
-6. **Generation**: When the character threshold (10,000) is reached, ChatGPT generates an updated document that:
-   - Preserves existing valuable information
-   - Integrates new information from Slack conversations
-   - Maintains proper formatting and structure
-   - Removes outdated information
+6. **Versioning**: Each update creates a new version stored in MongoDB that can be reverted if needed.
 
-7. **Versioning**: Each update creates a new version that can be reverted if needed.
+7. **Vector Storage**: Updated document chunks are stored in ChromaDB for future RAG queries and document routing.
 
-8. **Vector Storage**: Document chunks are stored in ChromaDB for future RAG queries.
+8. **Notifications**: Optional Slack notifications are sent to inform users when documents are updated.
 
 ## Configuration
 
@@ -540,8 +535,8 @@ Key environment variables:
 - `GOOGLE_DRIVE_FOLDER_ID`: Google Drive folder ID containing documents (required)
 - `GOOGLE_CREDENTIALS_PATH`: Path to Google service account JSON file (required)
 - `OPENAI_API_KEY`: OpenAI API key for GPT-4 (required)
-- `CHAR_THRESHOLD`: Character count threshold for document generation (default: 10000)
-- `BATCH_SIZE`: Message count threshold (default: 50, set in `services/bot_service/buffer.py`)
+- `OPENAI_BASE_URL`: Optional base URL for OpenAI-compatible APIs (e.g., OpenRouter: `https://openrouter.ai/api/v1`)
+- `OPENAI_MODEL`: Model to use (default: `gpt-4`)
 - `CHROMA_DB_PATH`: Path for ChromaDB storage (default: `./chroma_db`)
 - `CHROMA_HOST`: ChromaDB host (default: `localhost`, use `chromadb` in Docker)
 - `CHROMA_PORT`: ChromaDB port (default: 8000)
@@ -637,9 +632,11 @@ Epimetheus-Bot/
 - **Vector Search**: ChromaDB used for content-based document routing
 - **ChromaDB**: Can be used as persistent local client or via HTTP (recommended for Docker)
 - **Message Filtering**: Bot ignores its own messages to prevent loops
+- **Real-time Processing**: Messages are processed immediately upon receipt (no batching delays)
 - **Scalability**: Services can run together in a single process or separately
 - **Communication**: Bot and Updater Service communicate via Redis queue (no HTTP required)
 - **Document Routing**: Messages automatically routed to documents using vector similarity search
+- **Slack Notifications**: Optional notifications sent to Slack threads when documents are updated
 
 ## Testing
 
@@ -685,10 +682,10 @@ tests/
 
 The end-to-end tests (`test_e2e.py`) cover:
 
-1. **Complete Message Flow**: Tests the full pipeline from message ingestion → buffering → consumption → document update
+1. **Complete Message Flow**: Tests the full pipeline from message ingestion → queueing → consumption → document update
 2. **Document Routing**: Verifies messages are correctly routed to documents using vector search
 3. **Fallback Routing**: Tests fallback behavior when vector search is unavailable
-4. **Multi-Thread Processing**: Ensures batches with multiple threads are processed correctly
+4. **Multi-Thread Processing**: Ensures messages from multiple threads are processed correctly
 5. **Manual Trigger**: Tests manual document update triggering
 
 ### Test Fixtures
