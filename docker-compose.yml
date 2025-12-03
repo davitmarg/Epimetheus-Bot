@@ -5,7 +5,7 @@ services:
     image: redis:7-alpine
     container_name: epimetheus-redis
     ports:
-      - "6379:6379"
+      - "6379:6379" 
     volumes:
       - redis_data:/data
     command: redis-server --appendonly yes
@@ -27,11 +27,7 @@ services:
     environment:
       - IS_PERSISTENT=TRUE
       - ANONYMIZED_TELEMETRY=FALSE
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/heartbeat"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
+    # Removed healthcheck per request (often fails due to missing curl in base image)
     networks:
       - epimetheus-network
 
@@ -44,6 +40,8 @@ services:
       - mongodb_data:/data/db
     environment:
       - MONGO_INITDB_DATABASE=epimetheus
+      # These still need to be passed here to initialize the Mongo user, 
+      # but we pull the values from the .env context automatically
       - MONGO_INITDB_ROOT_USERNAME=${MONGODB_USERNAME:-root}
       - MONGO_INITDB_ROOT_PASSWORD=${MONGODB_PASSWORD:-password}
     healthcheck:
@@ -54,46 +52,41 @@ services:
     networks:
       - epimetheus-network
 
-  # Main application service (runs bot, updater, and API services together)
   app:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: epimetheus-app
+    # Explicitly telling it to run main.py
+    command: python main.py
     ports:
-      - "8000:8000"  # API service port
+      - "8000:8000"
+    
+    # 1. Load secrets and config from your .env file
+    env_file:
+      - .env
+      
+    # 2. Hardcode internal Docker networking overrides here.
+    # This ensures the app looks for 'redis' (the container name),
+    # regardless of what might be in your local .env file.
     environment:
       - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - REDIS_DB=0
-      - CHAR_THRESHOLD=${CHAR_THRESHOLD:-10000}
-      - CHROMA_DB_PATH=/app/chroma_db
       - CHROMA_HOST=chromadb
-      - CHROMA_PORT=8000
-      - CHROMA_USE_HTTP=true
       - MONGODB_HOST=mongodb
-      - MONGODB_PORT=27017
-      - MONGODB_DATABASE=epimetheus
-      - MONGODB_USERNAME=${MONGODB_USERNAME:-root}
-      - MONGODB_PASSWORD=${MONGODB_PASSWORD:-password}
-      - SLACK_BOT_TOKEN=${SLACK_BOT_TOKEN}
-      - SLACK_APP_TOKEN=${SLACK_APP_TOKEN}
       - GOOGLE_CREDENTIALS_PATH=/app/credentials.json
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - OPENAI_BASE_URL=${OPENAI_BASE_URL:-}
-      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4}
-      - OPENROUTER_REFERER=${OPENROUTER_REFERER:-https://github.com/epimetheus-bot}
-      - OPENROUTER_TITLE=${OPENROUTER_TITLE:-Epimetheus Bot}
+      - CHROMA_DB_PATH=/app/chroma_db
+      
     volumes:
       - ./chroma_db:/app/chroma_db
       - ./credentials.json:/app/credentials.json:ro
     depends_on:
       redis:
         condition: service_healthy
-      chromadb:
-        condition: service_healthy
       mongodb:
         condition: service_healthy
+      chromadb:
+        # Changed from service_healthy to service_started because we removed the healthcheck
+        condition: service_started
     networks:
       - epimetheus-network
     restart: unless-stopped
@@ -106,4 +99,3 @@ volumes:
 networks:
   epimetheus-network:
     driver: bridge
-
