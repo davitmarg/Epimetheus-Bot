@@ -24,7 +24,7 @@ slack_app = App(token=SLACK_BOT_TOKEN)
 @slack_app.event("message")
 def handle_message(event, body, say):
     """Handle incoming Slack message events"""
-    
+
     if event.get("bot_id"):
         return
 
@@ -36,7 +36,7 @@ def handle_message(event, body, say):
 @slack_app.event("app_mention")
 def handle_message(event, body, say):
     """Handle incoming Slack message events"""
-    
+
     if event.get("bot_id"):
         return
 
