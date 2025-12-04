@@ -4,12 +4,13 @@ Epimetheus Bot - Main Entry Point
 Orchestrates all services: Bot, Updater, and API.
 """
 
+import multiprocessing
 import threading
 import sys
 import uvicorn
 from dotenv import load_dotenv
 from services.updater_service import start_updater_service
-from services.bot_service import start_bot_service
+from services.bot.service import start as start_bot_service
 from services.api_service import app as api_app
 from repository.document_repository import sync_drive_folder_to_mapping
 
@@ -21,16 +22,12 @@ def initalize():
     try:
         print("Syncing Drive folder mapping on startup...")
         mapping = sync_drive_folder_to_mapping()
-        print(f"Drive folder synced successfully. Found {len(mapping.get('documents', []))} documents.")
+        print(
+            f"Drive folder synced successfully. Found {len(mapping.get('documents', []))} documents."
+        )
     except Exception as e:
         print(f"Warning: Failed to sync Drive folder on startup: {str(e)}")
         print("You can manually sync using: POST /api/v1/drive/mapping/sync")
-
-
-def start_bot_thread():
-    """Start the Slack bot in a background thread"""
-    print("Starting Project Epimetheus bot...")
-    start_bot_service()
 
 
 def start_updater_thread():
@@ -43,7 +40,7 @@ if __name__ == "__main__":
     # Check command line arguments to determine which service to run
     if len(sys.argv) > 1:
         service = sys.argv[1].lower()
-        
+
         if service == "bot":
             print("Starting Project Epimetheus Bot only...")
             start_bot_service()
@@ -68,9 +65,9 @@ if __name__ == "__main__":
         # Sync Drive folder mapping before starting services
         initalize()
 
-        # Start the Bot in a background thread
-        bot_thread = threading.Thread(target=start_bot_thread, daemon=True)
-        bot_thread.start()
+        # Start the Bot in a background process (not thread cause the bot must run in main thread)
+        bot_process = multiprocessing.Process(target=start_bot_service)
+        bot_process.start()
 
         # Start the Updater Service in a background thread
         updater_thread = threading.Thread(target=start_updater_thread, daemon=True)
