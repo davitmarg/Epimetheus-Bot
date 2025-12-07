@@ -10,10 +10,7 @@ import uuid
 from datetime import datetime
 from typing import Dict, Any, List, Optional
 from utils.db_utils import get_mongodb_db, get_chroma_collection
-from repository.drive_repository import (
-    list_documents_in_folder,
-    search_documents_by_name,
-)
+from repository.drive_repository import get_drive_repository
 
 
 class DocumentRepository:
@@ -22,6 +19,7 @@ class DocumentRepository:
     def __init__(self):
         self.db = get_mongodb_db()
         self.collection = get_chroma_collection()
+        self.drive_repo = get_drive_repository()
         if self.db is not None:
             self._init_collections()
     
@@ -257,14 +255,6 @@ class DocumentRepository:
         
         return document
     
-    def delete_drive_document(self, doc_id: str) -> bool:
-        """Delete a document from the drive mapping collection"""
-        if self.db is None:
-            return False
-        
-        result = self.mapping_collection.delete_one({"doc_id": doc_id})
-        return result.deleted_count > 0
-    
     # Convenience methods combining Drive and MongoDB operations
     
     def search_documents(self, query: str, folder_id: Optional[str] = None) -> List[Dict[str, Any]]:
@@ -276,7 +266,7 @@ class DocumentRepository:
         
         # Search by name in Drive
         if folder_id:
-            drive_results = search_documents_by_name(query, folder_id)
+            drive_results = self.drive_repo.search_documents_by_name(query, folder_id)
             documents.extend(drive_results)
         
         # Search in MongoDB metadata
@@ -304,7 +294,7 @@ class DocumentRepository:
             raise ValueError("GOOGLE_DRIVE_FOLDER_ID must be configured")
         
         # List documents from Drive
-        drive_documents = list_documents_in_folder(folder_id)
+        drive_documents = self.drive_repo.list_documents_in_folder(folder_id)
         
         # Upsert each document individually into the mapping collection
         synced_docs = []
@@ -359,7 +349,7 @@ class DocumentRepository:
             return documents
         
         # Fallback to querying Drive API directly
-        documents = list_documents_in_folder(folder_id)
+        documents = self.drive_repo.list_documents_in_folder(folder_id)
         
         # Update mapping for future use
         if documents:
@@ -434,22 +424,3 @@ def get_document_repository() -> DocumentRepository:
     if _document_repository is None:
         _document_repository = DocumentRepository()
     return _document_repository
-
-
-# Convenience functions for backward compatibility
-def search_documents(query: str, folder_id: Optional[str] = None) -> List[Dict[str, Any]]:
-    """Search for documents by name or metadata"""
-    repo = get_document_repository()
-    return repo.search_documents(query, folder_id)
-
-
-def sync_drive_folder_to_mapping(folder_id: Optional[str] = None) -> Dict[str, Any]:
-    """Sync Drive folder contents to MongoDB mapping"""
-    repo = get_document_repository()
-    return repo.sync_drive_folder_to_mapping(folder_id)
-
-
-def get_documents_from_mapping(folder_id: Optional[str] = None) -> List[Dict[str, Any]]:
-    """Get documents from MongoDB mapping or Drive API"""
-    repo = get_document_repository()
-    return repo.get_documents_from_mapping(folder_id)

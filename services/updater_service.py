@@ -1,55 +1,42 @@
 """
-The Archivist (Updater Service)
+Updater Service
 
-This service consumes messages from Redis and immediately processes them,
-updating documents with each message.
+Checks last x messages from queue and decides every x messages if knowledge base updates are needed.
+Processes messages from Redis queue:
+1. Chunks messages (last x messages)
+2. Extracts knowledge from chunks
+3. Determines if document needs update
+4. If update needed: processes update
+5. If not needed: flushes and continues
 
-Supports multiple dynamic documents in a Google Drive folder.
+Also supports direct function calls for immediate processing (mentions, agent tools).
 """
 
 import os
 import json
 import time
 from typing import Dict, Any, List, Optional
-from openai import OpenAI
 from dotenv import load_dotenv
 
 # Import database utilities
-from utils.db_utils import (
-    get_redis_client,
-    REDIS_QUEUE_KEY
-)
+from utils.db_utils import get_redis_client, REDIS_QUEUE_KEY
+from utils.message_utils import extract_doc_id_from_chunk_id
 
 # Import repositories
-from repository.drive_repository import (
-    get_document_content,
-    update_document_content,
-    create_document
-)
+from repository.drive_repository import get_drive_repository
 from repository.document_repository import get_document_repository
-from repository.slack_repository import send_document_update_notification
+from repository.slack_repository import get_slack_repository
+from repository.llm_repository import get_llm_repository
 
 load_dotenv()
 
-# Configuration
 GOOGLE_DRIVE_FOLDER_ID = os.environ.get("GOOGLE_DRIVE_FOLDER_ID")
 
-# Initialize OpenAI client (supports OpenRouter)
-openai_base_url = os.environ.get("OPENAI_BASE_URL")
-openai_api_key = os.environ.get("OPENAI_API_KEY")
-openai_model = os.environ.get("OPENAI_MODEL", "gpt-4")
-
-openai_client = OpenAI(
-    base_url=openai_base_url,
-    api_key=openai_api_key,
-)
-
-# Initialize database connections using utils
 redis_client = get_redis_client()
-
-# Initialize document repository
 document_repo = get_document_repository()
-
+drive_repo = get_drive_repository()
+llm_repo = get_llm_repository()
+slack_repo = get_slack_repository()
 
 def determine_target_documents(messages: List[Dict[str, Any]], team_id: str) -> List[str]:
     """
@@ -79,7 +66,7 @@ def determine_target_documents(messages: List[Dict[str, Any]], team_id: str) -> 
                     for id_list in results['ids']:
                         for chunk_id in id_list:
                             # Extract doc_id from chunk_id (format: doc_id_chunk_N)
-                            doc_id = chunk_id.rsplit('_chunk_', 1)[0]
+                            doc_id = extract_doc_id_from_chunk_id(chunk_id)
                             doc_ids.add(doc_id)
                     
                     if doc_ids:
@@ -104,7 +91,7 @@ def determine_target_documents(messages: List[Dict[str, Any]], team_id: str) -> 
     # Last resort: create a default document
     if GOOGLE_DRIVE_FOLDER_ID:
         try:
-            default_doc = create_document(
+            default_doc = drive_repo.create_document(
                 name=f"Team {team_id} Documentation",
                 folder_id=GOOGLE_DRIVE_FOLDER_ID,
                 initial_content=""
@@ -167,103 +154,196 @@ def update_vector_db(doc_id: str, content: str):
 
 
 def generate_document_update(old_content: str, new_messages: List[Dict[str, Any]]) -> str:
-    """Use ChatGPT to generate updated document content"""
-    if not openai_client:
-        raise Exception("OpenAI API key not configured")
-    
-    # Format messages for context
-    message_context = []
-    for msg in new_messages:
-        user = msg.get('user', 'unknown')
-        text = msg.get('text', '')
-        timestamp = msg.get('ts', '')
-        message_context.append(f"[{timestamp}] {user}: {text}")
-    
-    messages_text = "\n".join(message_context)
-    
-    prompt = f"""You are an AI assistant that updates technical documentation based on Slack conversations.
-
-Current Document Content:
-{old_content}
-
-New Information from Slack Conversations:
-{messages_text}
-
-Please generate an updated version of the document that:
-1. Preserves all existing valuable information
-2. Integrates the new information from Slack conversations naturally
-3. Maintains proper formatting and structure
-4. Removes any outdated information that conflicts with the new information
-5. Ensures the document is clear, comprehensive, and up-to-date
-
-Return ONLY the updated document content, without any explanations or markdown formatting."""
-
+    """Use LLM repository to generate updated document content"""
     try:
-        response = openai_client.chat.completions.create(
-            model=openai_model,
-            messages=[
-                {"role": "system", "content": "You are a technical documentation expert."},
-                {"role": "user", "content": prompt}
-            ],
+        return llm_repo.generate_document_update(
+            old_content=old_content,
+            new_messages=new_messages,
             temperature=0.3,
             max_tokens=4000
         )
-        
-        return response.choices[0].message.content.strip()
     except Exception as e:
         raise Exception(f"Error generating document update: {str(e)}")
 
 
 def generate_change_summary(old_content: str, new_content: str, new_messages: List[Dict[str, Any]]) -> str:
-    """Use ChatGPT to generate a concise summary of document changes"""
-    if not openai_client:
-        return "Document updated successfully."
-    
-    # Format messages for context
-    message_context = []
-    for msg in new_messages:
-        user = msg.get('user', 'unknown')
-        text = msg.get('text', '')
-        message_context.append(f"{user}: {text}")
-    
-    messages_text = "\n".join(message_context[:5])  # Limit to first 5 messages for summary
-    
-    prompt = f"""You are an AI assistant that summarizes changes made to technical documentation.
-
-Original Document Content (first 500 chars):
-{old_content[:500]}
-
-Updated Document Content (first 500 chars):
-{new_content[:500]}
-
-New Information from Slack Conversations:
-{messages_text}
-
-Please generate a brief, concise summary (2-3 sentences) describing what changed in the document based on the new information. Focus on:
-- What new information was added
-- What sections were updated
-- Key changes or improvements
-
-Return ONLY the summary text, without any formatting or markdown."""
-
+    """Use LLM repository to generate a concise summary of document changes"""
     try:
-        response = openai_client.chat.completions.create(
-            model=openai_model,
-            messages=[
-                {"role": "system", "content": "You are a technical documentation expert who writes clear, concise summaries."},
-                {"role": "user", "content": prompt}
-            ],
+        return llm_repo.generate_change_summary(
+            old_content=old_content,
+            new_content=new_content,
+            new_messages=new_messages,
             temperature=0.5,
             max_tokens=200
         )
-        
-        return response.choices[0].message.content.strip()
     except Exception as e:
         print(f"Warning: Error generating change summary: {str(e)}")
         return "Document updated successfully."
 
 
-def process_document_update(doc_id: str, messages: List[Dict[str, Any]], trigger_type: str = "automatic") -> Dict[str, Any]:
+def chunk_messages(messages: List[Dict[str, Any]], chunk_size: int = None) -> List[List[Dict[str, Any]]]:
+    """
+    Chunk messages into groups of last N messages.
+    
+    Args:
+        messages: List of message dictionaries
+        chunk_size: Number of messages per chunk (defaults to MESSAGE_CHUNK_SIZE env var or 10)
+        
+    Returns:
+        List of message chunks (each chunk is a list of messages)
+    """
+    if chunk_size is None:
+        chunk_size = int(os.environ.get("MESSAGE_CHUNK_SIZE", "10"))
+    
+    if not messages:
+        return []
+    
+    # Filter out bot messages
+    user_messages = [msg for msg in messages if not msg.get("bot_id")]
+    
+    if not user_messages:
+        return []
+    
+    # Sort messages by timestamp (oldest first)
+    sorted_messages = sorted(user_messages, key=lambda x: float(x.get("ts", 0)))
+    
+    # Create chunks of last N messages
+    chunks = []
+    for i in range(len(sorted_messages)):
+        chunk = sorted_messages[max(0, i - chunk_size + 1):i + 1]
+        if len(chunk) >= 2:  # Only include chunks with at least 2 messages
+            chunks.append(chunk)
+    
+    # Return the most recent chunk if we have messages
+    if sorted_messages:
+        recent_chunk = sorted_messages[-chunk_size:] if len(sorted_messages) >= chunk_size else sorted_messages
+        return [recent_chunk]
+    
+    return []
+
+
+def extract_knowledge_from_chunk(messages: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Extract knowledge from a chunk of messages using LLM.
+    
+    Args:
+        messages: List of message dictionaries
+        
+    Returns:
+        Dictionary with extracted knowledge and metadata
+    """
+    if not messages:
+        return {
+            "knowledge": "",
+            "has_new_information": False,
+            "relevance_score": 0.0
+        }
+    
+    # Combine message texts
+    message_texts = []
+    for msg in messages:
+        text = msg.get("text", "")
+        user = msg.get("user", "unknown")
+        timestamp = msg.get("ts", "")
+        message_texts.append(f"[{timestamp}] {user}: {text}")
+    
+    combined_text = "\n".join(message_texts)
+    
+    # Use LLM repository to extract knowledge
+    try:
+        knowledge = llm_repo.extract_knowledge(
+            conversation_text=combined_text,
+            temperature=0.3,
+            max_tokens=500
+        )
+        
+        # Check if there's new information
+        has_new_information = knowledge.upper() != "NO_NEW_INFORMATION" and len(knowledge) > 20
+        
+        # Calculate relevance score based on knowledge length and content
+        relevance_score = 0.0
+        if has_new_information:
+            # Simple heuristic: longer, more detailed knowledge = higher relevance
+            relevance_score = min(1.0, len(knowledge) / 500.0)
+        
+        return {
+            "knowledge": knowledge,
+            "has_new_information": has_new_information,
+            "relevance_score": relevance_score,
+            "message_count": len(messages)
+        }
+        
+    except Exception as e:
+        print(f"Error extracting knowledge: {e}")
+        return {
+            "knowledge": "",
+            "has_new_information": False,
+            "relevance_score": 0.0,
+            "error": str(e)
+        }
+
+
+def determine_if_document_needs_update(
+    knowledge: str,
+    messages: List[Dict[str, Any]],
+    team_id: str
+) -> Optional[Dict[str, Any]]:
+    """
+    Determine if a document needs updating based on extracted knowledge.
+    Uses RAG to find relevant documents.
+    
+    Args:
+        knowledge: Extracted knowledge string
+        messages: Original messages that generated the knowledge
+        team_id: Slack team ID
+        
+    Returns:
+        Dictionary with doc_id and confidence, or None if no update needed
+    """
+    knowledge_extraction_threshold = float(os.environ.get("KNOWLEDGE_EXTRACTION_THRESHOLD", "0.7"))
+    
+    if not knowledge or len(knowledge.strip()) < 20:
+        return None
+    
+    try:
+        # Use vector search to find relevant documents
+        search_results = document_repo.search_similar_documents(knowledge, n_results=3)
+        
+        if not search_results or not search_results.get('ids') or not search_results['ids'][0]:
+            # No relevant documents found, but knowledge exists
+            # Could create a new document or return None
+            return None
+        
+        # Get the most relevant document
+        chunk_ids = search_results['ids'][0]
+        distances_list = search_results.get('distances', [[]])[0]
+        
+        if not chunk_ids or not distances_list:
+            return None
+        
+        # Extract doc_id from first chunk
+        first_chunk_id = chunk_ids[0]
+        doc_id = extract_doc_id_from_chunk_id(first_chunk_id)
+        distance = distances_list[0] if len(distances_list) > 0 else 1.0
+        
+        # Check if relevance is high enough (lower distance = more relevant)
+        relevance_threshold = 1.0 - knowledge_extraction_threshold  # Convert threshold to distance
+        
+        if distance < relevance_threshold:
+            return {
+                "doc_id": doc_id,
+                "confidence": 1.0 - distance,  # Convert distance to confidence
+                "distance": distance
+            }
+        
+        return None
+        
+    except Exception as e:
+        print(f"Error determining document update need: {e}")
+        return None
+
+
+def process_document_update(doc_id: str, messages: List[Dict[str, Any]], trigger_type: str = "agent_command") -> Dict[str, Any]:
     """
     Process document update immediately with the given messages
     
@@ -295,7 +375,7 @@ def process_document_update(doc_id: str, messages: List[Dict[str, Any]], trigger
     
     # Get current document content
     try:
-        old_content = get_document_content(doc_id)
+        old_content = drive_repo.get_document_content(doc_id)
     except Exception as e:
         result["error"] = f"Error reading document: {str(e)}"
         print(f"Error reading document {doc_id}: {e}")
@@ -333,9 +413,8 @@ def process_document_update(doc_id: str, messages: List[Dict[str, Any]], trigger
         print(f"Error saving version for {doc_id}: {e}")
         return result
     
-    # Update Google Doc
     try:
-        update_document_content(doc_id, new_content)
+        drive_repo.update_document_content_partial(doc_id, old_content, new_content)
     except Exception as e:
         result["error"] = f"Error updating Google Doc: {str(e)}"
         print(f"Error updating Google Doc {doc_id}: {e}")
@@ -354,11 +433,20 @@ def process_document_update(doc_id: str, messages: List[Dict[str, Any]], trigger
 
 
 def ingest_messages(payload: Dict[str, Any]):
-    """Process messages from Redis queue immediately"""
+    """
+    Process messages from Redis queue as a log.
+    
+    Works as a log that:
+    1. Chunks messages
+    2. Extracts knowledge from chunks
+    3. Checks if document needs update
+    4. If update needed: processes update
+    5. If not needed: flushes and continues
+    """
     team_id = payload.get('team_id')
     threads = payload.get('threads', [])
-    channel = payload.get('channel')  # Channel for Slack notification
-    thread_ts = payload.get('thread_ts')  # Thread timestamp for Slack notification
+    channel = payload.get('channel')
+    thread_ts = payload.get('thread_ts')
     
     if not threads:
         return
@@ -369,35 +457,56 @@ def ingest_messages(payload: Dict[str, Any]):
         all_messages.extend(thread_batch.get('messages', []))
     
     if not all_messages:
+        print(f"⏭️  No messages to process, flushing")
         return
     
-    # Determine which document(s) should receive these messages
-    target_doc_ids = determine_target_documents(all_messages, team_id)
+    # Chunk messages
+    message_chunks = chunk_messages(all_messages)
     
-    if not target_doc_ids:
-        print("Warning: No target documents found for messages")
-        # Send notification about failure if channel/thread available
-        if channel and thread_ts:
-            send_document_update_notification(
-                channel=channel,
-                thread_ts=thread_ts,
-                doc_id="",
-                doc_name="Unknown",
-                message_count=len(all_messages),
-                success=False,
-                error_message="No target documents found for messages"
-            )
+    if not message_chunks:
+        print(f"⏭️  No valid chunks from {len(all_messages)} messages, flushing")
         return
     
-    # Process each message immediately - assign to first target document
-    doc_id = target_doc_ids[0]
+    # Process the most recent chunk
+    latest_chunk = message_chunks[-1]
     
-    # Process update immediately with all messages
-    result = process_document_update(doc_id, all_messages, trigger_type="automatic")
+    # Extract knowledge from the chunk
+    knowledge_result = extract_knowledge_from_chunk(latest_chunk)
+    
+    if not knowledge_result.get("has_new_information"):
+        print(f"⏭️  No new knowledge extracted from {len(latest_chunk)} messages, flushing")
+        return
+    
+    knowledge = knowledge_result.get("knowledge", "")
+    print(f"📝 Extracted knowledge from {len(latest_chunk)} messages: {knowledge[:100]}...")
+    
+    # Determine if a document needs updating
+    update_decision = determine_if_document_needs_update(
+        knowledge=knowledge,
+        messages=latest_chunk,
+        team_id=team_id
+    )
+    
+    if not update_decision:
+        print(f"⏭️  No document update needed, flushing")
+        return
+    
+    # Document needs update - process it
+    doc_id = update_decision["doc_id"]
+    confidence = update_decision["confidence"]
+    
+    print(f"📄 Document {doc_id} needs update (confidence: {confidence:.2f})")
+    
+    # Process the document update
+    result = process_document_update(
+        doc_id=doc_id,
+        messages=latest_chunk,
+        trigger_type="redis_queue"
+    )
     
     # Send Slack notification if channel and thread_ts are available
     if channel and thread_ts:
-        send_document_update_notification(
+        slack_repo.send_document_update_notification(
             channel=channel,
             thread_ts=thread_ts,
             doc_id=result["doc_id"],
@@ -409,15 +518,21 @@ def ingest_messages(payload: Dict[str, Any]):
         )
     
     if result["success"]:
-        print(f"✓ Processed {len(all_messages)} message(s) for doc {doc_id}")
+        print(f"✓ Successfully updated document {doc_id} based on queue log")
     else:
-        print(f"✗ Failed to process {len(all_messages)} message(s) for doc {doc_id}: {result.get('error')}")
+        print(f"✗ Failed to update document {doc_id}: {result.get('error')}")
 
 
 def consume_from_redis():
-    """Consume messages from Redis queue pushed by RedisBuffer"""
+    """
+    Consume messages from Redis queue as a log.
+    
+    Continuously processes messages from queue, checking chunks for knowledge extraction
+    and only updating documents when needed.
+    """
     print(f"Starting Redis consumer on queue: {REDIS_QUEUE_KEY}")
-    print(f"Waiting for batches from RedisBuffer...")
+    print(f"Update processing uses BOTH direct calls and Redis queue consumption.")
+    print(f"Waiting for messages from Redis queue...")
     
     # Verify Redis connection and queue status
     try:
@@ -488,7 +603,7 @@ def consume_from_redis():
                 time.sleep(1)
 
 
-def start_updater_service():
+def start():
     """Start the updater service consumer"""
     print("Starting Epimetheus Updater Service (Redis Consumer)...")    
     consume_from_redis()

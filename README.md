@@ -102,29 +102,34 @@ graph LR
 
 ### Component Architecture
 
-The system consists of three main services and a repository layer:
+The system consists of four main services and a repository layer:
 
 #### Services (with run functions)
 
-**1. Bot Service** (`services/bot_service/`)
-- Listens to Slack message events
-- Filters out bot messages to prevent loops
-- Immediately dispatches each message to Redis queue for processing
-- Uses `BotBuffer` to handle message ingestion and queueing
+**1. Bot Service** (`services/bot_service.py`)
+- Unified service handling both regular messages and app mentions
+- **Message Handling**: Listens to all Slack message events, filters bot messages, buffers messages by thread and dispatches to Redis queue when batch size is reached
+- **App Mentions**: Handles direct mentions (`@Epimetheus`) using agentic repository for intelligent responses
+- Uses Redis-based message buffering system (`MessageBuffer`) for async processing
+- Processes mentions with LangChain-based agent for Q&A and document updates
+- Replies directly to users in Slack threads with loading/success/error reactions
+- Falls back to checking message text for bot mentions if app_mention events don't fire
 
 **2. Updater Service** (`services/updater_service.py`)
-- Consumes messages from Redis queue (one at a time)
-- Processes each message immediately upon receipt
+- Consumes messages from Redis queue for async/batched processing
+- **Knowledge Extraction**: Extracts knowledge from message chunks and determines if documents need updating
 - Determines target document(s) using vector search (ChromaDB)
-- Generates updated document versions using OpenAI GPT-4
-- Intelligently merges new information with existing document content
+- Generates updated document versions using OpenAI GPT-4 via LLM Repository
+- Intelligently merges new information with existing document content using partial updates (preserves formatting)
 - Maintains version history with revert capability
 - Stores document chunks in ChromaDB for RAG context
 - Sends Slack notifications when documents are updated
+- Supports direct function calls for immediate processing (from agent tools)
+- Processes messages as a log: chunks messages → extracts knowledge → checks if update needed → processes update or flushes
 
 **3. API Service** (`services/api_service.py`)
 - Provides REST API endpoints for managing documents
-- Allows manual triggering of updates
+- Allows manual triggering of updates (verification)
 - Enables version management and reverting
 - Provides status and health check endpoints
 - Manages Drive folder mapping synchronization
@@ -143,6 +148,27 @@ The system consists of three main services and a repository layer:
 - Convenience methods combining Drive and MongoDB operations
 - Search across Drive and metadata
 - Folder synchronization
+- Vector search operations for RAG
+
+**LLM Repository** (`repository/llm_repository/`)
+- Centralized LLM operations using LangChain
+- Prompt management via `prompts.py` module
+- Document update generation
+- Change summary generation
+- Question answering with RAG
+- Intent classification
+- Knowledge extraction from conversations
+- Supports OpenAI and OpenAI-compatible APIs (e.g., OpenRouter)
+- **Agent System** (`agentic.py`): EpimetheusAgent class for processing user messages with LangChain tools
+- **Agent Tools**: LangChain tools defined in `agentic.py`:
+  - `answer_question_from_documentation`: Answers questions using RAG
+  - `update_documentation_with_information`: Updates documents with new information
+  - `get_document_count`: Returns document count
+  - `list_all_documents`: Lists all documents with links
+  - `get_document_last_updated`: Checks document update times
+  - `update_document_formatting`: Updates document formatting without changing content
+  - `update_document_partial`: Performs partial updates to specific sections
+- **Agentic Repository** (`agentic.py`): Processes Slack mention commands, extracts document mentions, uses vector search for document routing, and coordinates agent responses
 
 ## Quick Start with Docker Compose
 
@@ -230,27 +256,29 @@ The bot needs specific permissions to read messages from channels. Here's how to
 2. **Add Required Scopes:**
    Click **"Add an OAuth Scope"** and add each of the following scopes:
 
-   **Required Scopes (for reading messages):**
-   - `channels:history` - View messages in public channels
-     - *Allows the bot to read message history from public channels*
-   - `channels:read` - View basic information about public channels
-     - *Allows the bot to see which public channels exist*
-   - `groups:history` - View messages in private channels
-     - *Allows the bot to read message history from private channels*
-   - `groups:read` - View basic information about private channels
-     - *Allows the bot to see which private channels it's a member of*
-   - `im:history` - View messages in direct messages
-     - *Allows the bot to read direct message conversations*
-   - `im:read` - View basic information about direct messages
-     - *Allows the bot to see direct message conversations*
-   - `mpim:history` - View messages in group direct messages
-     - *Allows the bot to read group direct message conversations*
-   - `mpim:read` - View basic information about group direct messages
-     - *Allows the bot to see group direct message conversations*
+   **Required Scopes:**
+   - `app_mentions:read` - Read app mentions
+     - *Required for the bot to receive mention events*
+   - `chat:write` - Send messages
+     - *Required for the bot to reply to mentions*
+   - `reactions:write` - Add/remove reactions
+     - *Required for loading indicators (⏳ → ✅)*
+   - `channels:history` - Read channel message history
+     - *Required to read message context for processing*
+   - `channels:read` - View basic channel information
+     - *Required to access channel details*
+   - `groups:history` - Read private channel message history
+     - *Required for private channel support*
+   - `groups:read` - View basic private channel information
+     - *Required for private channel support*
+   - `mpim:history` - Read group DM message history
+     - *Required for group DM support*
+   - `mpim:read` - View basic group DM information
+     - *Required for group DM support*
 
    **Optional Scopes:**
-   - `chat:write` - Send messages as the bot
-     - *Optional: Only needed if you want the bot to respond to messages*
+   - `im:history` - Read direct message history (if you want DM support)
+   - `im:read` - View direct message information (if you want DM support)
 
    📖 **Reference:** [Slack OAuth Scopes](https://api.slack.com/scopes)
 
@@ -472,6 +500,48 @@ By default, running `python main.py` starts all three services:
 - Updater service - Redis consumer (background thread)
 - API service - FastAPI server (main thread, port 8000)
 
+## Key Features
+
+### Knowledge Extraction System
+
+The bot automatically extracts knowledge from Slack conversations:
+
+- **Message Chunking**: Analyzes the last N messages (configurable via `MESSAGE_CHUNK_SIZE`)
+- **Knowledge Extraction**: Uses LLM to identify key facts, updates, and information worth documenting
+- **Relevance Scoring**: Calculates confidence scores to determine if documents need updating
+- **Automatic Updates**: Triggers document updates when new knowledge is detected
+
+### LangChain Agent System
+
+The bot includes a sophisticated agent system for handling direct mentions:
+
+- **Question Answering**: Answers questions about existing documentation using RAG
+- **Document Updates**: Updates documentation when users provide new information
+- **Document Management**: Lists documents, checks update times, gets document counts
+- **Formatting Tools**: Updates document formatting or performs partial section updates
+- **Tool-Based Architecture**: Uses LangChain tools for structured operations:
+  - `answer_question_from_documentation`: RAG-based Q&A with document links
+  - `update_documentation_with_information`: Document updates with change summaries
+  - `get_document_count`: Returns count of documents in the system
+  - `list_all_documents`: Lists all documents with names and Google Docs links
+  - `get_document_last_updated`: Checks when documents were last modified
+  - `update_document_formatting`: Updates formatting (headings, bold, italic, lists) without changing content
+  - `update_document_partial`: Performs partial updates to specific sections (preserves formatting and enables versioning)
+- **Context-Aware**: Maintains conversation context and provides relevant document links
+- **Automatic Routing**: Uses vector search to find relevant documents when not explicitly mentioned
+- **Error Handling**: Graceful error handling with informative error messages
+- **Reaction Feedback**: Visual feedback with loading (⏳), success (✅), and error (❌) reactions
+
+### LLM Repository & Prompt Management
+
+Centralized LLM operations with clean prompt management:
+
+- **Unified Interface**: Single repository for all LLM operations
+- **Prompt Centralization**: All prompts managed in `repository/llm_repository/prompts.py`
+- **Flexible Backend**: Supports OpenAI and OpenAI-compatible APIs (e.g., OpenRouter)
+- **Consistent Patterns**: Standardized prompt templates for document updates, Q&A, summaries, and knowledge extraction
+- **No Redundancy**: All LLM operations go through the repository, eliminating duplicate LLM instance creation
+
 ## API Endpoints
 
 The API Service exposes the following endpoints:
@@ -491,7 +561,7 @@ The API Service exposes the following endpoints:
 - `PUT /api/v1/drive/mapping` - Manually update the Drive file mapping
 
 ### Document Versions
-- `POST /api/v1/trigger` - Manually trigger document generation
+- `POST /api/v1/trigger` - Verify document exists (documents are updated automatically when messages are received)
 - `GET /api/v1/versions/{doc_id}` - List all document versions
 - `GET /api/v1/versions/{doc_id}/{version_id}` - Get specific version
 - `POST /api/v1/revert/{doc_id}/{version_id}` - Revert to previous version
@@ -500,31 +570,65 @@ The API Service exposes the following endpoints:
 
 ## How It Works
 
+### Automatic Knowledge Extraction Flow
+
 1. **Message Ingestion**: The Bot listens to Slack channels and receives message events in real-time.
 
-2. **Immediate Dispatch**: Each message is immediately pushed to a Redis queue (`epimetheus:updater_queue`) for processing. No batching or threshold waiting.
+2. **Knowledge Extraction**: For each message:
+   - Retrieves the last N messages from the channel (configurable via `MESSAGE_CHUNK_SIZE`)
+   - Chunks messages into groups for analysis
+   - Uses LLM to extract knowledge from message chunks
+   - Determines if extracted knowledge contains new information worth documenting
 
-3. **Message Consumption**: The Updater Service consumes messages from the Redis queue using blocking pop operations, processing them one at a time.
+3. **Document Routing**: If new knowledge is detected:
+   - Uses vector similarity search in ChromaDB to find relevant documents
+   - Calculates confidence scores based on relevance
+   - Routes to the most relevant document(s)
 
-4. **Document Routing**: The Updater Service determines which document(s) should receive the message using:
-   - Vector similarity search in ChromaDB (primary method)
-   - Fallback to documents in the Drive folder mapping
-   - Creation of a default document if none exist
-
-5. **Document Update**: For each message, the system:
+4. **Document Update**: The system:
    - Reads the current document content from Google Docs
-   - Prepares context combining the existing document and new message
-   - Uses OpenAI GPT-4 to generate an updated document that:
+   - Prepares context combining the existing document and new messages
+   - Uses OpenAI GPT-4 (via LLM Repository) to generate an updated document that:
      - Preserves existing valuable information
-     - Integrates new information from the Slack message
+     - Integrates new information from Slack conversations
      - Maintains proper formatting and structure
      - Removes outdated information when appropriate
 
-6. **Versioning**: Each update creates a new version stored in MongoDB that can be reverted if needed.
+5. **Versioning**: Each update creates a new version stored in MongoDB that can be reverted if needed.
 
-7. **Vector Storage**: Updated document chunks are stored in ChromaDB for future RAG queries and document routing.
+6. **Vector Storage**: Updated document chunks are stored in ChromaDB for future RAG queries and document routing.
 
-8. **Notifications**: Optional Slack notifications are sent to inform users when documents are updated.
+### Direct Mention Flow (Agent-Based)
+
+1. **App Mention**: When the bot is directly mentioned (`@Epimetheus`):
+   - Extracts the message text (removing bot mention)
+   - Attempts to extract document ID from message (Google Docs URLs)
+   - If no document ID found, uses vector search to find relevant document
+
+2. **Agent Processing**: The LangChain agent:
+   - Classifies user intent (question vs. update)
+   - Uses appropriate tools:
+     - `answer_question_from_documentation`: Answers questions using RAG
+     - `update_documentation_with_information`: Updates documents with new information
+   - Processes tool calls and generates responses
+
+3. **Response**: The agent responds directly in the Slack thread with:
+   - Answers to questions (with document links)
+   - Confirmation of document updates (with summaries and links)
+
+### Redis Queue-Based Flow (Log-Based Processing)
+
+The system uses Redis queue for log-based knowledge extraction:
+- Messages are buffered by thread and pushed to Redis queue (`epimetheus:updater_queue`) via `MessageBuffer` when batch size is reached
+- Updater Service continuously consumes from queue (blocking pop, one at a time)
+- **Log-Based Processing**: Messages are processed as a log:
+  1. Chunks messages (last N messages, configurable via `MESSAGE_CHUNK_SIZE`)
+  2. Extracts knowledge from chunks using LLM
+  3. Checks if document needs update based on relevance threshold
+  4. If update needed: processes update
+  5. If not needed: flushes and continues
+- Provides async/batched processing capability
+- **Dual Processing**: Updater Service supports BOTH direct calls (for immediate agent tool execution) and Redis queue consumption (for log-based knowledge extraction) simultaneously
 
 ## Configuration
 
@@ -537,6 +641,8 @@ Key environment variables:
 - `OPENAI_API_KEY`: OpenAI API key for GPT-4 (required)
 - `OPENAI_BASE_URL`: Optional base URL for OpenAI-compatible APIs (e.g., OpenRouter: `https://openrouter.ai/api/v1`)
 - `OPENAI_MODEL`: Model to use (default: `gpt-4`)
+- `MESSAGE_CHUNK_SIZE`: Number of recent messages to analyze for knowledge extraction (default: `10`)
+- `KNOWLEDGE_EXTRACTION_THRESHOLD`: Relevance threshold for knowledge extraction (default: `0.7`)
 - `CHROMA_DB_PATH`: Path for ChromaDB storage (default: `./chroma_db`)
 - `CHROMA_HOST`: ChromaDB host (default: `localhost`, use `chromadb` in Docker)
 - `CHROMA_PORT`: ChromaDB port (default: 8000)
@@ -550,6 +656,92 @@ Key environment variables:
 - `REDIS_PORT`: Redis port (default: 6379)
 - `REDIS_DB`: Redis database number (default: 0)
 
+## Usage Examples
+
+### Using the Bot in Slack
+
+#### Automatic Knowledge Extraction
+
+The bot automatically monitors channels and extracts knowledge:
+
+1. **Normal Conversation**: Just chat in channels where the bot is present
+   - The bot analyzes the last N messages (default: 10)
+   - Extracts knowledge and updates relevant documents automatically
+   - No action required from users
+
+2. **Example Conversation**:
+   ```
+   User A: "We've updated our deployment process. Now we use Docker Compose."
+   User B: "Yes, and we've added health checks to all services."
+   ```
+   The bot will:
+   - Extract knowledge about the deployment process update
+   - Find relevant documentation using vector search
+   - Update the documentation automatically
+
+#### Direct Mentions (Agent Mode)
+
+Mention the bot directly (`@Epimetheus`) for interactive Q&A or updates:
+
+1. **Asking Questions**:
+   ```
+   @Epimetheus What's our deployment process?
+   ```
+   The bot will:
+   - Search documentation using RAG
+   - Provide an answer with relevant document links
+   - Respond in the thread
+
+2. **Providing Updates**:
+   ```
+   @Epimetheus We've changed our API endpoint to /api/v2
+   ```
+   The bot will:
+   - Determine which document to update
+   - Update the documentation
+   - Confirm with a summary and document link
+
+3. **Mentioning Specific Documents**:
+   ```
+   @Epimetheus Update https://docs.google.com/document/d/DOC_ID with: New feature added
+   ```
+   The bot will:
+   - Extract the document ID from the URL
+   - Update that specific document
+   - Confirm the update
+
+4. **Listing Documents**:
+   ```
+   @Epimetheus List all documents
+   ```
+   The bot will:
+   - List all documents with names and links
+   - Show document count
+
+5. **Checking Update Times**:
+   ```
+   @Epimetheus When was the last document updated?
+   ```
+   The bot will:
+   - Check last modified times for documents
+   - Show documents sorted by update time
+
+6. **Formatting Documents**:
+   ```
+   @Epimetheus Format the deployment document with proper headings
+   ```
+   The bot will:
+   - Update document formatting without changing content
+   - Apply requested formatting improvements
+
+7. **Partial Updates**:
+   ```
+   @Epimetheus Update the API section with: New endpoint added
+   ```
+   The bot will:
+   - Update only the specified section
+   - Preserve formatting and enable versioning
+
 ## Manual Operations
 
 ### Sync Drive Folder Mapping
@@ -558,12 +750,13 @@ The Drive folder mapping is automatically synced when the API service starts. Yo
 curl -X POST http://localhost:8000/api/v1/drive/mapping/sync
 ```
 
-### Trigger Manual Update
+### Verify Document Exists
 ```bash
 curl -X POST http://localhost:8000/api/v1/trigger \
   -H "Content-Type: application/json" \
   -d '{"doc_id": "your-doc-id"}'
 ```
+Note: Documents are automatically updated when messages are received. This endpoint only verifies that a document exists.
 
 ### List Documents
 ```bash
@@ -599,27 +792,33 @@ The Docker Compose setup creates persistent volumes for:
 
 ```
 Epimetheus-Bot/
-├── services/              # Services with run functions
-│   ├── bot_service/       # Slack bot listener
-│   │   ├── __init__.py    # Bot service entry point
-│   │   └── buffer.py      # Redis message buffer
-│   ├── updater_service.py # Document updater (Redis consumer)
-│   └── api_service.py     # FastAPI REST API
-├── repository/            # Data access layer
+├── services/                    # Services with run functions
+│   ├── bot_service.py           # Unified Slack bot (messages + mentions)
+│   ├── updater_service.py       # Document updater (Redis consumer + knowledge extraction)
+│   └── api_service.py           # FastAPI REST API
+├── repository/                  # Data access layer
 │   ├── drive_repository.py      # Google Drive operations
-│   └── document_repository.py   # MongoDB operations + convenience methods
-├── utils/                # Shared utilities
-│   ├── db_utils.py       # Database connections (Redis, MongoDB, ChromaDB)
-│   └── message_utils.py  # Message formatting utilities
-├── main.py               # Application entry point
-├── requirements.txt      # Python dependencies
-├── docker-compose.yml    # Docker Compose configuration
-├── Dockerfile           # Docker image definition
-├── tests/               # Test suite
-│   ├── __init__.py      # Test package
-│   ├── conftest.py      # Pytest fixtures
-│   └── test_e2e.py     # End-to-end tests
-└── README.md           # This file
+│   ├── document_repository.py   # MongoDB operations + convenience methods
+│   ├── slack_repository.py      # Slack API operations
+│   └── llm_repository/          # LLM operations with LangChain
+│       ├── __init__.py          # LLM Repository implementation
+│       ├── agentic.py           # Agent system, tools, and agentic repository
+│       └── prompts.py           # Centralized prompt management
+├── utils/                       # Shared utilities
+│   ├── db_utils.py              # Database connections (Redis, MongoDB, ChromaDB)
+│   ├── message_utils.py         # Message formatting utilities and document ID extraction helpers
+│   └── constants.py             # Constants and default messages
+├── main.py                      # Application entry point
+├── requirements.txt             # Python dependencies
+├── docker-compose.yml           # Docker Compose configuration
+├── Dockerfile                   # Docker image definition
+├── pytest.ini                   # Pytest configuration
+├── .env-example                 # Environment variables template
+├── tests/                       # Test suite (if exists)
+│   ├── __init__.py              # Test package
+│   ├── conftest.py              # Pytest fixtures
+│   └── test_e2e.py              # End-to-end tests
+└── README.md                    # This file
 ```
 
 ## Notes
@@ -629,14 +828,23 @@ Epimetheus-Bot/
 - **Drive Mapping**: File mapping stored in MongoDB (`drive_file_mapping` collection) for fast access
 - **Auto-Sync**: Drive folder mapping is automatically synced on API service startup. Manual sync available via `POST /api/v1/drive/mapping/sync`
 - **Versioning**: Version history stored in MongoDB for scalability and querying
-- **Vector Search**: ChromaDB used for content-based document routing
+- **Vector Search**: ChromaDB used for content-based document routing and RAG queries
 - **ChromaDB**: Can be used as persistent local client or via HTTP (recommended for Docker)
 - **Message Filtering**: Bot ignores its own messages to prevent loops
-- **Real-time Processing**: Messages are processed immediately upon receipt (no batching delays)
-- **Scalability**: Services can run together in a single process or separately
-- **Communication**: Bot and Updater Service communicate via Redis queue (no HTTP required)
-- **Document Routing**: Messages automatically routed to documents using vector similarity search
-- **Slack Notifications**: Optional notifications sent to Slack threads when documents are updated
+- **Knowledge Extraction**: Automatically extracts knowledge from message chunks and determines if documents need updating using LLM-based extraction
+- **Agent System**: LangChain-based agent handles direct mentions with 7 tools for Q&A, document updates, listing, formatting, and partial updates
+- **LLM Repository**: Centralized LLM operations with LangChain and prompt management
+- **Prompt Management**: All prompts centralized in `repository/llm_repository/prompts.py` for easy maintenance
+- **Log-Based Processing**: Messages processed as a log: chunk → extract knowledge → check relevance → update or flush
+- **Dual Processing**: Updater Service supports BOTH direct calls (for agent tools) and Redis queue consumption (for log-based extraction) simultaneously
+- **Scalability**: Services can run together in a single process or separately (bot, updater, api)
+- **Message Buffering**: `MessageBuffer` class buffers messages by thread and dispatches to Redis when batch size reached
+- **Document Routing**: Messages automatically routed to documents using vector similarity search (ChromaDB)
+- **Slack Notifications**: Notifications sent to Slack threads when documents are updated (with change summaries)
+- **Direct Mentions**: Bot responds to direct mentions (`@Epimetheus`) with agent-based Q&A or document updates, with loading/success/error reactions
+- **Fallback Mention Detection**: Checks message text for bot mentions if app_mention events don't fire
+- **Version History**: Complete version history stored in MongoDB with revert capability
+- **Vector Storage**: Document chunks stored in ChromaDB for RAG queries and document routing
 
 ## Testing
 

@@ -17,24 +17,17 @@ load_dotenv()
 app = FastAPI(title="Epimetheus API Service")
 
 from services.updater_service import (
-    process_document_update,
     list_document_versions,
     load_document_version,
     update_vector_db,
     GOOGLE_DRIVE_FOLDER_ID,
 )
 
-from repository.drive_repository import (
-    get_document_content,
-    update_document_content,
-    create_document
-)
-from repository.document_repository import (
-    get_document_repository,
-    search_documents,
-    sync_drive_folder_to_mapping,
-    get_documents_from_mapping
-)
+from repository.drive_repository import get_drive_repository
+from repository.document_repository import get_document_repository
+
+drive_repo = get_drive_repository()
+document_repo = get_document_repository()
 
 
 class ManualTriggerRequest(BaseModel):
@@ -65,7 +58,7 @@ async def manual_trigger(request: ManualTriggerRequest):
     
     # Verify document exists
     try:
-        content = get_document_content(doc_id)
+        content = drive_repo.get_document_content(doc_id)
     except Exception as e:
         raise HTTPException(status_code=404, detail=f"Document {doc_id} not found: {str(e)}")
     
@@ -105,7 +98,7 @@ async def revert_to_version(doc_id: str, version_id: str):
     content = version_data.get('content', '')
     
     try:
-        update_document_content(doc_id, content)
+        drive_repo.update_document_content(doc_id, content)
         update_vector_db(doc_id, content)
         
         return {
@@ -132,7 +125,7 @@ async def get_status():
 async def list_documents(folder_id: Optional[str] = Query(None, description="Filter by folder ID")):
     """List all documents in the Drive folder"""
     try:
-        docs = get_documents_from_mapping(folder_id)
+        docs = document_repo.get_documents_from_mapping(folder_id)
         return {
             "documents": docs,
             "folder_id": folder_id or GOOGLE_DRIVE_FOLDER_ID
@@ -146,7 +139,7 @@ async def search_docs(query: str = Query(..., description="Search query"),
                      folder_id: Optional[str] = Query(None, description="Filter by folder ID")):
     """Search for documents by name or content"""
     try:
-        results = search_documents(query, folder_id)
+        results = document_repo.search_documents(query, folder_id)
         return {
             "query": query,
             "results": results,
@@ -160,7 +153,7 @@ async def search_docs(query: str = Query(..., description="Search query"),
 async def create_doc(request: CreateDocumentRequest):
     """Create a new document in the Drive folder"""
     try:
-        doc = create_document(
+        doc = drive_repo.create_document(
             name=request.name,
             folder_id=request.folder_id,
             initial_content=request.initial_content or ""
@@ -168,8 +161,7 @@ async def create_doc(request: CreateDocumentRequest):
         
         # Save metadata if provided
         if request.tags or request.description:
-            repo = get_document_repository()
-            repo.save_metadata(
+            document_repo.save_metadata(
                 doc_id=doc['id'],
                 name=request.name,
                 folder_id=doc.get('folder_id'),
@@ -189,9 +181,8 @@ async def create_doc(request: CreateDocumentRequest):
 async def get_document(doc_id: str):
     """Get document content and metadata"""
     try:
-        repo = get_document_repository()
-        content = get_document_content(doc_id)
-        metadata = repo.get_metadata(doc_id)
+        content = drive_repo.get_document_content(doc_id)
+        metadata = document_repo.get_metadata(doc_id)
         
         return {
             "doc_id": doc_id,
@@ -205,8 +196,7 @@ async def get_document(doc_id: str):
 @app.get("/api/v1/documents/{doc_id}/metadata")
 async def get_metadata(doc_id: str):
     """Get document metadata"""
-    repo = get_document_repository()
-    metadata = repo.get_metadata(doc_id)
+    metadata = document_repo.get_metadata(doc_id)
     if not metadata:
         raise HTTPException(status_code=404, detail="Document metadata not found")
     return metadata
@@ -216,14 +206,13 @@ async def get_metadata(doc_id: str):
 async def update_metadata(doc_id: str, request: UpdateMetadataRequest):
     """Update document metadata"""
     try:
-        repo = get_document_repository()
         # Get existing metadata
-        existing = repo.get_metadata(doc_id)
+        existing = document_repo.get_metadata(doc_id)
         if not existing:
             raise HTTPException(status_code=404, detail="Document not found")
         
         # Update metadata
-        repo.save_metadata(
+        document_repo.save_metadata(
             doc_id=doc_id,
             name=request.name or existing.get('name', ''),
             folder_id=existing.get('folder_id'),
@@ -245,8 +234,7 @@ async def update_metadata(doc_id: str, request: UpdateMetadataRequest):
 async def get_all_metadata(folder_id: Optional[str] = Query(None, description="Filter by folder ID")):
     """Get metadata for all documents"""
     try:
-        repo = get_document_repository()
-        metadata_list = repo.get_all_metadata(folder_id)
+        metadata_list = document_repo.get_all_metadata(folder_id)
         return {
             "documents": metadata_list,
             "count": len(metadata_list)
@@ -259,8 +247,7 @@ async def get_all_metadata(folder_id: Optional[str] = Query(None, description="F
 async def get_drive_mapping(folder_id: Optional[str] = Query(None, description="Filter by folder ID")):
     """Get all documents from the Drive mapping collection (flat structure)"""
     try:
-        repo = get_document_repository()
-        documents = repo.get_drive_mapping(folder_id=folder_id)
+        documents = document_repo.get_drive_mapping(folder_id=folder_id)
         return {
             "status": "success",
             "documents": documents,
@@ -275,7 +262,7 @@ async def get_drive_mapping(folder_id: Optional[str] = Query(None, description="
 async def sync_drive_mapping(folder_id: Optional[str] = Query(None, description="Folder ID to sync (defaults to configured folder)")):
     """Sync Drive folder contents to MongoDB mapping (flat documents)"""
     try:
-        result = sync_drive_folder_to_mapping(folder_id)
+        result = document_repo.sync_drive_folder_to_mapping(folder_id)
         return {
             "status": "success",
             "message": "Drive folder synced successfully",
@@ -293,8 +280,7 @@ async def update_drive_document(doc_id: str = Query(..., description="Document I
                                 folder_id: str = Query(..., description="Folder ID")):
     """Manually update a single document in the Drive mapping"""
     try:
-        repo = get_document_repository()
-        document = repo.upsert_drive_document(
+        document = document_repo.upsert_drive_document(
             doc_id=doc_id,
             name=name,
             folder_id=folder_id

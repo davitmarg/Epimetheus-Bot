@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   redis:
     image: redis:7-alpine
@@ -71,8 +69,18 @@ services:
     # regardless of what might be in your local .env file.
     environment:
       - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_DB=0
+      - CHROMA_DB_PATH=/app/chroma_db
       - CHROMA_HOST=chromadb
       - MONGODB_HOST=mongodb
+      - MONGODB_PORT=27017
+      - MONGODB_DATABASE=epimetheus
+      - MONGODB_USERNAME=${MONGODB_USERNAME:-root}
+      - MONGODB_PASSWORD=${MONGODB_PASSWORD:-password}
+      - SLACK_BOT_TOKEN=${SLACK_BOT_TOKEN}
+      - SLACK_APP_TOKEN=${SLACK_APP_TOKEN}
+      - GOOGLE_DRIVE_FOLDER_ID=${GOOGLE_DRIVE_FOLDER_ID}
       - GOOGLE_CREDENTIALS_PATH=/app/credentials.json
       - CHROMA_DB_PATH=/app/chroma_db
       
