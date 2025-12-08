@@ -7,7 +7,7 @@ triggering updates, and checking service status.
 Supports multiple dynamic documents in a Google Drive folder.
 """
 
-from typing import Optional, List, Dict, Any
+from typing import Optional, List
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel
 from dotenv import load_dotenv
@@ -16,7 +16,7 @@ load_dotenv()
 
 app = FastAPI(title="Epimetheus API Service")
 
-from services.updater_service import (
+from services.updater.updater_service_old import (
     list_document_versions,
     load_document_version,
     update_vector_db,

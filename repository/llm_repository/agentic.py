@@ -139,7 +139,7 @@ def update_documentation_with_information(
     """
     try:
         # Lazy import to avoid circular dependency
-        from services.updater_service import determine_target_documents, process_document_update
+        from services.updater.updater_service_old import determine_target_documents, process_document_update
         
         slack_repo = get_slack_repository()
         
@@ -466,7 +466,7 @@ def update_document_formatting(
         drive_repo.update_document_content_partial(doc_id, old_content, new_content)
         
         # Update vector database
-        from services.updater_service import update_vector_db
+        from services.updater.updater_service_old import update_vector_db
         update_vector_db(doc_id, new_content)
         
         # Return result data for agent to format
@@ -502,7 +502,7 @@ def update_document_partial(
     """
     try:
         from repository.drive_repository import get_drive_repository
-        from services.updater_service import update_vector_db, save_document_version
+        from services.updater.updater_service_old import update_vector_db, save_document_version
         
         document_repo = get_document_repository()
         drive_repo = get_drive_repository()
