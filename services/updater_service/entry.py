@@ -7,11 +7,8 @@ import time
 import json
 from dotenv import load_dotenv
 
-# Import database utilities
 from utils.db_utils import get_redis_client, REDIS_QUEUE_KEY
-
-# Import local modules
-from services.updater.core import ingest_messages
+from .core import ingest_messages
 
 load_dotenv()
 

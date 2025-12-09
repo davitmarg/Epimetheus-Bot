@@ -91,14 +91,23 @@ class LLMRepository:
         old_content: str,
         new_content: str,
         new_messages: List[Dict[str, Any]],
+        doc_id: Optional[str] = None,
         temperature: float = 0.5,
         max_tokens: Optional[int] = 200,
     ) -> str:
         """
         Generate a summary of document changes using LangChain.
+        
+        Args:
+            old_content: Original document content
+            new_content: Updated document content
+            new_messages: List of message dictionaries
+            doc_id: Optional document ID to include link in summary
+            temperature: LLM temperature
+            max_tokens: Maximum tokens for response
         """
         # Get prompt from prompts module
-        prompt_text = change_summary_prompt(old_content, new_content, new_messages)
+        prompt_text = change_summary_prompt(old_content, new_content, new_messages, doc_id)
 
         # Create messages for LangChain
         messages = [

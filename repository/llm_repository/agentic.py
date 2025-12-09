@@ -44,8 +44,8 @@ def answer_question_from_documentation(question: str) -> str:
         Answer to the question based on documentation
     """
     try:
-        # Lazy import to avoid circular dependency
-        from repository.llm_repository import get_llm_repository
+        # Lazy import to avoid circular dependency (get_llm_repository is in __init__.py)
+        from . import get_llm_repository
         
         document_repo = get_document_repository()
         llm_repo = get_llm_repository()
@@ -138,9 +138,7 @@ def update_documentation_with_information(
         Confirmation message about the update with document details
     """
     try:
-        # Lazy import to avoid circular dependency
-        from services.updater.updater_service_old import determine_target_documents, process_document_update
-        
+        document_repo = get_document_repository()
         slack_repo = get_slack_repository()
         
         # Create a message-like structure from the information
@@ -153,13 +151,13 @@ def update_documentation_with_information(
         
         # Determine target document if not specified
         if not doc_id:
-            target_doc_ids = determine_target_documents(messages, team_id="default")
+            target_doc_ids = document_repo.determine_target_documents(messages, team_id="default")
             if not target_doc_ids:
                 return "I couldn't determine which document to update. Please specify a document ID or ensure documents exist in the system."
             doc_id = target_doc_ids[0]
         
         # Process the document update
-        result = process_document_update(
+        result = document_repo.process_document_update(
             doc_id=doc_id,
             messages=messages,
             trigger_type="agent_command"
@@ -417,13 +415,9 @@ def update_document_formatting(
         Confirmation message about the formatting update
     """
     try:
-        from repository.llm_repository.prompts import document_formatting_prompt
-        from repository.llm_repository import get_llm_repository
-        from repository.drive_repository import get_drive_repository
-        
+        from .prompts import document_formatting_prompt
         document_repo = get_document_repository()
         drive_repo = get_drive_repository()
-        llm_repo = get_llm_repository()
         
         # Get document metadata
         metadata = document_repo.get_metadata(doc_id)
@@ -465,9 +459,7 @@ def update_document_formatting(
         # Apply partial update to preserve formatting
         drive_repo.update_document_content_partial(doc_id, old_content, new_content)
         
-        # Update vector database
-        from services.updater.updater_service_old import update_vector_db
-        update_vector_db(doc_id, new_content)
+        document_repo.update_vector_db(doc_id, new_content)
         
         # Return result data for agent to format
         return f"Document formatting updated successfully. Document: {doc_name}, Formatting instructions applied: {formatting_instructions}"
@@ -501,9 +493,6 @@ def update_document_partial(
         Confirmation message about the partial update
     """
     try:
-        from repository.drive_repository import get_drive_repository
-        from services.updater.updater_service_old import update_vector_db, save_document_version
-        
         document_repo = get_document_repository()
         drive_repo = get_drive_repository()
         
@@ -535,13 +524,13 @@ def update_document_partial(
             "trigger_type": "agent_partial_update",
             "section_updated": section_to_update[:100]  # Store first 100 chars of section
         }
-        version_id = save_document_version(doc_id, old_content, version_metadata)
+        version_id = document_repo.save_version(doc_id, old_content, version_metadata)
         
         # Apply partial update (this preserves formatting and enables versioning)
         drive_repo.update_document_content_partial(doc_id, old_content, new_full_content)
         
         # Update vector database
-        update_vector_db(doc_id, new_full_content)
+        document_repo.update_vector_db(doc_id, new_full_content)
         
         # Return result data for agent to format
         return f"Partial update successful. Document: {doc_name}, Action: {update_type}, Version: {version_id}"
@@ -655,7 +644,7 @@ class EpimetheusAgent:
                 
                 if not tool_name:
                     continue
-                
+
                 # Find the tool
                 tool_func = None
                 for tool in self.tools:

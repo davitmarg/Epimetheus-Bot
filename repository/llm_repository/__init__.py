@@ -5,7 +5,7 @@ LLM Repository Package
 from typing import Dict, Any, Optional
 
 # Import the implementation class
-from .service import LLMRepository
+from .core import LLMRepository
 
 # Singleton instance
 _llm_repository: Optional[LLMRepository] = None

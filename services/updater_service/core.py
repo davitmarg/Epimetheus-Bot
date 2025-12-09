@@ -9,8 +9,8 @@ from typing import Dict, Any, List
 from repository.slack_repository import get_slack_repository
 
 # Import local modules
-from services.updater import storage
-from services.updater import intelligence
+from . import storage
+from . import intelligence
 
 slack_repo = get_slack_repository()
 
@@ -65,7 +65,7 @@ def process_document_update(
     # Generate change summary
     try:
         result["change_summary"] = intelligence.generate_change_summary(
-            old_content, new_content, messages
+            old_content, new_content, messages, doc_id
         )
     except Exception as e:
         print(f"Warning: Error generating change summary: {e}")

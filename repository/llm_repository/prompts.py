@@ -66,7 +66,7 @@ Return ONLY the updated document content with markdown formatting, without any e
     return prompt
 
 
-def change_summary_prompt(old_content: str, new_content: str, new_messages: List[Dict[str, Any]]) -> str:
+def change_summary_prompt(old_content: str, new_content: str, new_messages: List[Dict[str, Any]], doc_id: Optional[str] = None) -> str:
     """
     Generate a prompt for summarizing changes made to technical documentation.
     
@@ -74,6 +74,7 @@ def change_summary_prompt(old_content: str, new_content: str, new_messages: List
         old_content: Original document content (first 500 chars will be used)
         new_content: Updated document content (first 500 chars will be used)
         new_messages: List of message dictionaries with 'user', 'text' keys
+        doc_id: Optional document ID to include a link in the summary
     
     Returns:
         Formatted prompt string
@@ -86,6 +87,12 @@ def change_summary_prompt(old_content: str, new_content: str, new_messages: List
         message_context.append(f"{user}: {text}")
     
     messages_text = "\n".join(message_context)
+    
+    # Build document link instruction if doc_id is provided
+    doc_link_instruction = ""
+    if doc_id:
+        doc_url = f"https://docs.google.com/document/d/{doc_id}"
+        doc_link_instruction = f"\n\nIMPORTANT: Always end your summary with the document link. Format it as: \"View document: {doc_url}\""
     
     prompt = f"""You are an AI assistant that summarizes changes made to technical documentation.
 
@@ -101,7 +108,7 @@ New Information from Slack Conversations:
 Please generate a brief, concise summary (2-3 sentences) describing what changed in the document based on the new information. Focus on:
 - What new information was added
 - What sections were updated
-- Key changes or improvements
+- Key changes or improvements{doc_link_instruction}
 
 Return ONLY the summary text, without any formatting or markdown."""
     

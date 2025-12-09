@@ -99,7 +99,7 @@ def generate_document_update(
 
 
 def generate_change_summary(
-    old_content: str, new_content: str, new_messages: List[Dict[str, Any]]
+    old_content: str, new_content: str, new_messages: List[Dict[str, Any]], doc_id: Optional[str] = None
 ) -> str:
     """Use LLM repository to generate a concise summary of document changes"""
     try:
@@ -107,6 +107,7 @@ def generate_change_summary(
             old_content=old_content,
             new_content=new_content,
             new_messages=new_messages,
+            doc_id=doc_id,
             temperature=0.5,
             max_tokens=200,
         )

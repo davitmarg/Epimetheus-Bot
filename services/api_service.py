@@ -16,13 +16,6 @@ load_dotenv()
 
 app = FastAPI(title="Epimetheus API Service")
 
-from services.updater.updater_service_old import (
-    list_document_versions,
-    load_document_version,
-    update_vector_db,
-    GOOGLE_DRIVE_FOLDER_ID,
-)
-
 from repository.drive_repository import get_drive_repository
 from repository.document_repository import get_document_repository
 
@@ -72,7 +65,7 @@ async def manual_trigger(request: ManualTriggerRequest):
 @app.get("/api/v1/versions/{doc_id}")
 async def get_versions(doc_id: str):
     """List all versions for a document"""
-    versions = list_document_versions(doc_id)
+    versions = document_repo.list_versions(doc_id)
     return {
         "doc_id": doc_id,
         "versions": versions
@@ -82,7 +75,7 @@ async def get_versions(doc_id: str):
 @app.get("/api/v1/versions/{doc_id}/{version_id}")
 async def get_version(doc_id: str, version_id: str):
     """Get a specific document version"""
-    version_data = load_document_version(doc_id, version_id)
+    version_data = document_repo.load_version(doc_id, version_id)
     if not version_data:
         raise HTTPException(status_code=404, detail="Version not found")
     return version_data
@@ -91,7 +84,7 @@ async def get_version(doc_id: str, version_id: str):
 @app.post("/api/v1/revert/{doc_id}/{version_id}")
 async def revert_to_version(doc_id: str, version_id: str):
     """Revert document to a previous version"""
-    version_data = load_document_version(doc_id, version_id)
+    version_data = document_repo.load_version(doc_id, version_id)
     if not version_data:
         raise HTTPException(status_code=404, detail="Version not found")
     
@@ -99,7 +92,7 @@ async def revert_to_version(doc_id: str, version_id: str):
     
     try:
         drive_repo.update_document_content(doc_id, content)
-        update_vector_db(doc_id, content)
+        document_repo.update_vector_db(doc_id, content)
         
         return {
             "status": "success",
@@ -128,7 +121,7 @@ async def list_documents(folder_id: Optional[str] = Query(None, description="Fil
         docs = document_repo.get_documents_from_mapping(folder_id)
         return {
             "documents": docs,
-            "folder_id": folder_id or GOOGLE_DRIVE_FOLDER_ID
+            "folder_id": folder_id or document_repo.folder_id
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error listing documents: {str(e)}")
