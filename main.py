@@ -14,7 +14,7 @@ import sys
 import uvicorn
 from dotenv import load_dotenv
 from services.updater_service import start as start_updater_service
-from services.bot_service import start as start_bot_service
+from services.bot import start as start_bot_service
 from services.api_service import app as api_app
 from repository.document_repository import get_document_repository
 
