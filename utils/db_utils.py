@@ -29,6 +29,7 @@ MONGODB_PORT = int(os.environ.get("MONGODB_PORT", 27017))
 MONGODB_DATABASE = os.environ.get("MONGODB_DATABASE", "epimetheus")
 MONGODB_USERNAME = os.environ.get("MONGODB_USERNAME")
 MONGODB_PASSWORD = os.environ.get("MONGODB_PASSWORD")
+MONGODB_URI = os.environ.get("MONGODB_URI")
 
 # ChromaDB configuration
 CHROMA_DB_PATH = os.environ.get("CHROMA_DB_PATH", "./chroma_db")
@@ -69,7 +70,15 @@ def get_mongodb_client() -> MongoClient:
     if _mongodb_client is None:
         try:
             # Build connection URI with authentication if username/password provided
-            if MONGODB_USERNAME and MONGODB_PASSWORD:
+            if MONGODB_URI:
+                connection_uri = MONGODB_URI
+                print('Using MongoDB connection URI: ', connection_uri)
+                _mongodb_client = MongoClient(
+                    connection_uri,
+                    serverSelectionTimeoutMS=5000,
+                    connectTimeoutMS=5000
+                )
+            elif MONGODB_USERNAME and MONGODB_PASSWORD:
                 # Use MongoDB connection string format: mongodb://username:password@host:port/database
                 connection_uri = f"mongodb://{MONGODB_USERNAME}:{MONGODB_PASSWORD}@{MONGODB_HOST}:{MONGODB_PORT}/{MONGODB_DATABASE}?authSource=admin"
                 print('Using MongoDB connection string: ', connection_uri)

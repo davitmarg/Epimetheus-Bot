@@ -1,4 +1,3 @@
-import os
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 from services.bot.app import slack_app, SLACK_APP_TOKEN
 

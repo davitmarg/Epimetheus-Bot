@@ -22,3 +22,5 @@ Thumbs.db
 # Project specific
 *.log
 .env.local
+*.credentials.json
+live.credentials.json

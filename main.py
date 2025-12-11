@@ -11,28 +11,12 @@ Orchestrates all services:
 import multiprocessing
 import threading
 import sys
-import uvicorn
 from dotenv import load_dotenv
 from services.updater_service import start as start_updater_service
 from services.bot import start as start_bot_service
-from services.api_service import app as api_app
-from repository.document_repository import get_document_repository
+from services.api_service import start as start_api_service
 
 load_dotenv()
-
-
-def initialize():
-    """Sync Drive folder mapping on startup"""
-    try:
-        print("Syncing Drive folder mapping on startup...")
-        document_repo = get_document_repository()
-        mapping = document_repo.sync_drive_folder_to_mapping()
-        print(
-            f"Drive folder synced successfully. Found {len(mapping.get('documents', []))} documents."
-        )
-    except Exception as e:
-        print(f"Warning: Failed to sync Drive folder on startup: {str(e)}")
-        print("You can manually sync using: POST /api/v1/drive/mapping/sync")
 
 
 if __name__ == "__main__":
@@ -45,11 +29,10 @@ if __name__ == "__main__":
             start_bot_service()
         elif service == "updater":
             print("Starting Updater Service only...")
-            initialize()
             start_updater_service()
         elif service == "api":
             print("Starting API Service on http://0.0.0.0:8000")
-            uvicorn.run(api_app, host="0.0.0.0", port=8000, log_level="info")
+            start_api_service()
         else:
             print(f"Unknown service: {service}")
             print("Usage: python main.py [bot|updater|api]")
@@ -57,9 +40,6 @@ if __name__ == "__main__":
     else:
         # Default: Run all services
         print("Starting Project Epimetheus (all services)...")
-
-        # Sync Drive folder mapping before starting services
-        initialize()
 
         # Start Bot Service in a background process
         bot_service_process = multiprocessing.Process(target=start_bot_service)
@@ -71,4 +51,4 @@ if __name__ == "__main__":
 
         # Start the API Service in the main thread (blocking)
         print("Starting Epimetheus API Service on http://0.0.0.0:8000")
-        uvicorn.run(api_app, host="0.0.0.0", port=8000, log_level="info")
+        start_api_service()
