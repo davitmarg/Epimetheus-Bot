@@ -121,7 +121,7 @@ class DocumentRepository:
     
     # Document Metadata
     
-    def save_metadata(self, doc_id: str, name: str, tags: Optional[List[str]] = None, description: Optional[str] = None) -> Dict[str, Any]:
+    def save_metadata(self, doc_id: str, name: str, folder_id: Optional[str] = None, tags: Optional[List[str]] = None, description: Optional[str] = None) -> Dict[str, Any]:
         """Save or update document metadata in MongoDB"""
         if self.db is None:
             raise Exception("MongoDB connection not available")
@@ -129,7 +129,7 @@ class DocumentRepository:
         metadata = {
             "doc_id": doc_id,
             "name": name,
-            "folder_id": self.folder_id,
+            "folder_id": folder_id or self.folder_id,
             "tags": tags or [],
             "description": description or "",
             "updated_at": datetime.utcnow()
@@ -220,13 +220,13 @@ class DocumentRepository:
             return []
     
 
-    def get_drive_mapping(self) -> List[Dict[str, Any]]:
+    def get_drive_mapping(self, folder_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """Get all documents from the drive mapping collection, optionally filtered by folder_id"""
         if self.db is None:
             return []
         
         query = {}
-        query["folder_id"] = self.folder_id
+        query["folder_id"] = folder_id or self.folder_id
         
         documents = []
         for doc in self.mapping_collection.find(query):
@@ -240,7 +240,7 @@ class DocumentRepository:
         
         return documents
     
-    def upsert_drive_document(self, doc_id: str, name: str, created_time: Optional[str] = None, modified_time: Optional[str] = None) -> Dict[str, Any]:
+    def upsert_drive_document(self, doc_id: str, name: str, folder_id: Optional[str] = None, created_time: Optional[str] = None, modified_time: Optional[str] = None) -> Dict[str, Any]:
         """Insert or update a single document in the drive mapping collection"""
         if self.db is None:
             raise Exception("MongoDB connection not available")
@@ -248,7 +248,7 @@ class DocumentRepository:
         document = {
             "doc_id": doc_id,
             "name": name,
-            "folder_id": self.folder_id,
+            "folder_id": folder_id or self.folder_id,
             "created_time": created_time,
             "modified_time": modified_time,
             "updated_at": datetime.utcnow()
@@ -265,10 +265,11 @@ class DocumentRepository:
     
     # Convenience methods combining Drive and MongoDB operations
     
-    def search_documents(self, query: str) -> List[Dict[str, Any]]:
+    def search_documents(self, query: str, folder_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """Search for documents by name or metadata"""
+        target_folder_id = folder_id or self.folder_id
         documents = []        
-        drive_results = self.drive_repo.search_documents_by_name(query)
+        drive_results = self.drive_repo.search_documents_by_name(query, target_folder_id)
         documents.extend(drive_results)
         
         # Search in MongoDB metadata
@@ -287,10 +288,11 @@ class DocumentRepository:
         
         return documents
     
-    def sync_drive_folder_to_mapping(self) -> Dict[str, Any]:
+    def sync_drive_folder_to_mapping(self, folder_id: Optional[str] = None) -> Dict[str, Any]:
         """Sync Drive folder contents to MongoDB mapping (flat documents)"""
+        target_folder_id = folder_id or self.folder_id
         # List documents from Drive
-        self.mapping_collection.delete_many({})
+        self.mapping_collection.delete_many({"folder_id": target_folder_id})
         drive_documents = self.drive_repo.list_documents_in_folder()
         
         # Upsert each document individually into the mapping collection
@@ -314,22 +316,23 @@ class DocumentRepository:
         
         # Return summary
         return {
-            "folder_id": self.folder_id,
+            "folder_id": target_folder_id,
             "documents": synced_docs,
             "document_count": len(synced_docs),
             "synced_at": datetime.utcnow().isoformat()
         }
     
-    def get_documents_from_mapping(self) -> List[Dict[str, Any]]:
+    def get_documents_from_mapping(self, folder_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """Get documents from MongoDB mapping (flat collection) or Drive API"""
+        target_folder_id = folder_id or self.folder_id
         # Always sync latest Drive state into MongoDB so mapping stays fresh
         try:
-            self.sync_drive_folder_to_mapping()
+            self.sync_drive_folder_to_mapping(target_folder_id)
         except Exception as e:
             print(f"Drive Warning: Could not sync mapping before fetch: {e}")
         
         # First, try to get from MongoDB mapping (flat documents)
-        mapping_docs = self.get_drive_mapping()
+        mapping_docs = self.get_drive_mapping(target_folder_id)
         
         if mapping_docs:
             # Convert to expected format (with 'id' field for compatibility)
@@ -352,7 +355,7 @@ class DocumentRepository:
                 self.upsert_drive_document(
                     doc_id=doc['id'],
                     name=doc['name'],
-                    folder_id=self.folder_id,
+                    folder_id=target_folder_id,
                     created_time=doc.get('created_time'),
                     modified_time=doc.get('modified_time')
                 )
@@ -451,7 +454,7 @@ class DocumentRepository:
         # Strategy 3: Use documents from Drive folder mapping
         try:
             # Get documents from mapping or list from folder
-            docs = self.get_documents_from_mapping(self.folder_id)
+            docs = self.get_documents_from_mapping()
             if docs:
                 # For now, return all documents (could be filtered by relevance)
                 return [doc['id'] for doc in docs]
