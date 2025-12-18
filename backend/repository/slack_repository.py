@@ -5,6 +5,7 @@ Handles Slack API operations for sending notifications and replies.
 """
 
 import os
+import logging
 from typing import Dict, Any, Optional, List
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
@@ -23,14 +24,17 @@ class SlackRepository:
             raise ValueError("SLACK_BOT_TOKEN must be set")
         self.client = WebClient(token=SLACK_BOT_TOKEN)
     
-    def send_reply(self, channel: str, thread_ts: str, text: str) -> bool:
+    def send_reply(self, channel: str, thread_ts: str, text: str, team_id: Optional[str] = None, bot_id: Optional[str] = None) -> bool:
         """
         Send a reply to a Slack message thread
+        Also saves the bot response to MongoDB.
         
         Args:
             channel: Slack channel ID
             thread_ts: Thread timestamp (ts) of the message to reply to
             text: Message text to send
+            team_id: Optional team ID for saving the message
+            bot_id: Optional bot user ID for saving the message
             
         Returns:
             True if successful, False otherwise
@@ -41,7 +45,57 @@ class SlackRepository:
                 thread_ts=thread_ts,
                 text=text
             )
-            return response["ok"]
+            success = response.get("ok", False)
+            response_ts = response.get("ts")
+            
+            # Save bot response to MongoDB if we have the necessary info
+            if success and team_id and channel:
+                try:
+                    # Get bot_id if not provided
+                    if not bot_id:
+                        try:
+                            bot_info = self.client.auth_test()
+                            bot_id = bot_info.get("user_id")
+                        except Exception:
+                            pass
+                    
+                    if bot_id:
+                        # Generate timestamp if not available from response
+                        import time
+                        if not response_ts:
+                            response_ts = str(time.time())
+                        
+                        from repository.document_repository import get_document_repository
+                        document_repo = get_document_repository()
+                        if document_repo is None:
+                            logging.error(f"✗ ERROR: document_repository is None, cannot save bot response")
+                            logging.error(f"   Channel: {channel}, Thread: {thread_ts}, Text: {text[:50]}...")
+                        else:
+                            message_data = {
+                                "ts": response_ts,
+                                "channel": channel,
+                                "team_id": team_id,
+                                "user": bot_id,  # Bot user ID
+                                "text": text,
+                                "thread_ts": thread_ts,
+                                "bot_id": bot_id,
+                            }
+                            success = document_repo.save_message(message_data)
+                            if not success:
+                                logging.error(f"✗ ERROR: save_message returned False for bot response")
+                                logging.error(f"   Channel: {channel}, Thread: {thread_ts}")
+                                logging.error(f"   Message data: {message_data}")
+                    else:
+                        logging.warning(f"⚠ WARNING: Cannot save bot response - bot_id is None")
+                        logging.warning(f"   Channel: {channel}, Thread: {thread_ts}")
+                except Exception as e:
+                    # Don't fail if message storage fails, but log the error
+                    import traceback
+                    logging.error(f"✗ EXCEPTION: Failed to store bot response in MongoDB: {e}")
+                    logging.error(f"   Channel: {channel}, Thread: {thread_ts}, Text: {text[:50]}...")
+                    logging.error(f"   Traceback:\n{traceback.format_exc()}")
+            
+            return success
         except SlackApiError as e:
             print(f"Error sending Slack reply: {e.response['error']}")
             return False
@@ -106,10 +160,13 @@ class SlackRepository:
         message_count: int,
         success: bool = True,
         error_message: Optional[str] = None,
-        change_summary: Optional[str] = None
+        change_summary: Optional[str] = None,
+        team_id: Optional[str] = None,
+        bot_id: Optional[str] = None
     ) -> bool:
         """
         Send a notification about a document update
+        Also saves the bot response to MongoDB.
         
         Args:
             channel: Slack channel ID
@@ -120,6 +177,8 @@ class SlackRepository:
             success: Whether the update was successful
             error_message: Error message if update failed
             change_summary: Optional summary of changes made to the document
+            team_id: Optional team ID for saving the message
+            bot_id: Optional bot user ID for saving the message
             
         Returns:
             True if notification sent successfully, False otherwise
@@ -146,7 +205,7 @@ class SlackRepository:
                 f"Error: {error_message or 'Unknown error'}"
             )
 
-        return self.send_reply(channel, thread_ts, text)
+        return self.send_reply(channel, thread_ts, text, team_id=team_id, bot_id=bot_id)
     
     def add_reaction(self, channel: str, timestamp: str, emoji: str) -> bool:
         """

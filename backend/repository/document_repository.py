@@ -9,6 +9,7 @@ import os
 import uuid
 import time
 import json
+import logging
 from datetime import datetime
 from typing import Dict, Any, List, Optional
 from utils.db_utils import get_mongodb_db, get_chroma_collection, get_redis_client, REDIS_QUEUE_KEY
@@ -32,25 +33,49 @@ class DocumentRepository:
         self.folder_id = os.environ.get("GOOGLE_DRIVE_FOLDER_ID")
         if not self.folder_id:
             raise ValueError("GOOGLE_DRIVE_FOLDER_ID must be configured")
+        
+        # Log MongoDB connection status
         if self.db is not None:
+            logging.info(f"✓ DocumentRepository initialized: MongoDB connected (db: {self.db.name})")
             self._init_collections()
+            if hasattr(self, 'messages_collection') and self.messages_collection is not None:
+                logging.info(f"✓ Messages collection initialized: {self.messages_collection.name}")
+            else:
+                logging.error(f"✗ Messages collection NOT initialized!")
+        else:
+            logging.error(f"✗ DocumentRepository initialized: MongoDB connection is None!")
+            logging.error(f"   Messages will NOT be saved to database!")
     
     def _init_collections(self):
         """Initialize MongoDB collections and indexes"""
+        try:
+            # Document versions collection
+            self.versions_collection = self.db["document_versions"]
+            self.versions_collection.create_index([("doc_id", 1), ("created_at", -1)])
 
-        # Document versions collection
-        self.versions_collection = self.db["document_versions"]
-        self.versions_collection.create_index([("doc_id", 1), ("created_at", -1)])
+            # Document metadata collection
+            self.metadata_collection = self.db["document_metadata"]
+            self.metadata_collection.create_index([("doc_id", 1)])
+            self.metadata_collection.create_index([("folder_id", 1)])
 
-        # Document metadata collection
-        self.metadata_collection = self.db["document_metadata"]
-        self.metadata_collection.create_index([("doc_id", 1)])
-        self.metadata_collection.create_index([("folder_id", 1)])
+            # Drive file mapping collection (flat documents with folder_id)
+            self.mapping_collection = self.db["drive_file_mapping"]
+            self.mapping_collection.create_index([("doc_id", 1)], unique=True)
+            self.mapping_collection.create_index([("folder_id", 1)])
 
-        # Drive file mapping collection (flat documents with folder_id)
-        self.mapping_collection = self.db["drive_file_mapping"]
-        self.mapping_collection.create_index([("doc_id", 1)], unique=True)
-        self.mapping_collection.create_index([("folder_id", 1)])
+            # Messages collection - stores all Slack messages received
+            self.messages_collection = self.db["messages"]
+            self.messages_collection.create_index([("ts", 1)])
+            self.messages_collection.create_index([("channel", 1)])
+            self.messages_collection.create_index([("team_id", 1)])
+            self.messages_collection.create_index([("created_at", -1)])
+            logging.info(f"✓ messages_collection initialized: {self.messages_collection.name} in database {self.db.name}")
+            
+        except Exception as e:
+            logging.error(f"✗ ERROR initializing MongoDB collections: {e}")
+            import traceback
+            logging.error(f"   Traceback:\n{traceback.format_exc()}")
+            raise
 
     def save_version(self, doc_id: str, content: str, version_metadata: Dict[str, Any]) -> str:
         """Save a document version to MongoDB"""
@@ -856,6 +881,14 @@ class DocumentRepository:
         
         # Send Slack notification if channel and thread_ts are available
         if channel and thread_ts:
+            # Get bot_id for saving responses
+            bot_id = None
+            try:
+                bot_info = self.slack_repo.client.auth_test()
+                bot_id = bot_info.get("user_id")
+            except Exception:
+                pass
+            
             self.slack_repo.send_document_update_notification(
                 channel=channel,
                 thread_ts=thread_ts,
@@ -864,7 +897,9 @@ class DocumentRepository:
                 message_count=result["message_count"],
                 success=result["success"],
                 error_message=result.get("error"),
-                change_summary=result.get("change_summary")
+                change_summary=result.get("change_summary"),
+                team_id=team_id,
+                bot_id=bot_id
             )
         
         if result["success"]:
@@ -950,6 +985,170 @@ class DocumentRepository:
                     import traceback
                     traceback.print_exc()
                     time.sleep(1)
+
+    # Message Storage Methods
+    
+    def save_message(self, message_data: Dict[str, Any]) -> bool:
+        """Save a Slack message to MongoDB"""
+        # Check MongoDB connection
+        if self.db is None:
+            logging.error("✗ Cannot save message: MongoDB database connection is None")
+            logging.error(f"   Message data received: {message_data}")
+            return False
+        
+        # Check if messages_collection exists
+        if not hasattr(self, 'messages_collection') or self.messages_collection is None:
+            logging.error("✗ Cannot save message: messages_collection is not initialized")
+            logging.error(f"   Message data received: {message_data}")
+            logging.error(f"   Database object: {self.db}")
+            logging.error(f"   Database name: {self.db.name if self.db else 'N/A'}")
+            return False
+        
+        try:
+            # Extract and validate required fields
+            ts = message_data.get("ts")
+            channel = message_data.get("channel")
+            team_id = message_data.get("team_id")
+            user = message_data.get("user")
+            bot_id = message_data.get("bot_id")
+            text = message_data.get("text", "")
+            thread_ts = message_data.get("thread_ts")
+            
+            # Validate required fields
+            if not ts:
+                logging.error(f"✗ Cannot save message: 'ts' (timestamp) is missing")
+                logging.error(f"   Message data: {message_data}")
+                return False
+            
+            if not channel:
+                logging.error(f"✗ Cannot save message: 'channel' is missing")
+                logging.error(f"   Message data: {message_data}")
+                return False
+            
+            if not team_id:
+                logging.warning(f"⚠ Warning: 'team_id' is missing, but proceeding with save")
+                logging.warning(f"   Message data: {message_data}")
+            
+            message_doc = {
+                "ts": ts,
+                "channel": channel,
+                "team_id": team_id,
+                "user": user,
+                "text": text,
+                "thread_ts": thread_ts,
+                "bot_id": bot_id,
+                "created_at": datetime.utcnow(),
+                "raw_data": message_data  # Store full message for reference
+            }
+            
+            # Use ts and channel as unique identifier (Slack timestamp + channel)
+            query = {"ts": ts, "channel": channel}
+            
+            result = self.messages_collection.update_one(
+                query,
+                {"$set": message_doc},
+                upsert=True
+            )
+            
+            if result.upserted_id:
+                logging.info(f"✓ Message saved successfully (new document)")
+            elif result.modified_count > 0:
+                logging.info(f"✓ Message saved successfully (updated)")
+            elif result.matched_count == 0:
+                logging.warning(f"⚠ Message save operation completed but no document matched or created")
+            
+            # Verify the message was actually saved
+            try:
+                saved_doc = self.messages_collection.find_one(query)
+                if not saved_doc:
+                    logging.error(f"✗ Verification failed: Message not found after save operation!")
+                    logging.error(f"   Query used: {query}")
+                    # Don't return False here - the operation might have succeeded but verification failed
+            except Exception as verify_error:
+                logging.warning(f"⚠ Could not verify message save: {verify_error}")
+            
+            return True
+            
+        except Exception as e:
+            logging.error(f"✗ CRITICAL ERROR saving message to MongoDB")
+            logging.error(f"   Exception type: {type(e).__name__}")
+            logging.error(f"   Exception message: {str(e)}")
+            logging.error(f"   Message data: {message_data}")
+            logging.error(f"   Database connection: {'Connected' if self.db else 'Not connected'}")
+            logging.error(f"   Collection available: {'Yes' if hasattr(self, 'messages_collection') and self.messages_collection is not None else 'No'}")
+            import traceback
+            logging.error(f"   Full traceback:\n{traceback.format_exc()}")
+            return False
+    
+    def check_mongodb_connection(self) -> Dict[str, Any]:
+        """Diagnostic function to check MongoDB connection status"""
+        diagnostics = {
+            "db_available": self.db is not None,
+            "messages_collection_available": hasattr(self, 'messages_collection') and self.messages_collection is not None,
+            "db_name": self.db.name if self.db else None,
+            "collection_name": self.messages_collection.name if hasattr(self, 'messages_collection') and self.messages_collection is not None else None,
+        }
+        
+        # Try to ping MongoDB
+        try:
+            if self.db:
+                self.db.client.admin.command('ping')
+                diagnostics["mongodb_ping"] = "success"
+            else:
+                diagnostics["mongodb_ping"] = "failed - db is None"
+        except Exception as e:
+            diagnostics["mongodb_ping"] = f"failed - {str(e)}"
+        
+        # Try to count documents
+        try:
+            if hasattr(self, 'messages_collection') and self.messages_collection is not None:
+                count = self.messages_collection.count_documents({})
+                diagnostics["message_count"] = count
+            else:
+                diagnostics["message_count"] = "collection not available"
+        except Exception as e:
+            diagnostics["message_count"] = f"error - {str(e)}"
+        
+        return diagnostics
+    
+    def get_total_message_count(self, team_id: str = None) -> int:
+        """Get total count of messages stored in MongoDB"""
+        if self.db is None:
+            return 0
+        
+        try:
+            query = {}
+            if team_id:
+                query["team_id"] = team_id
+            return self.messages_collection.count_documents(query)
+        except Exception as e:
+            print(f"Error getting message count: {e}")
+            return 0
+    
+    def get_message_count_by_channel(self, channel_id: str, team_id: str = None) -> int:
+        """Get message count for a specific channel"""
+        if self.db is None:
+            return 0
+        
+        try:
+            query = {"channel": channel_id}
+            if team_id:
+                query["team_id"] = team_id
+            return self.messages_collection.count_documents(query)
+        except Exception as e:
+            print(f"Error getting channel message count: {e}")
+            return 0
+    
+    def get_document_action_count(self, doc_id: str) -> int:
+        """Get count of actions/changes (versions) for a document"""
+        if self.db is None:
+            return 0
+        
+        try:
+            return self.versions_collection.count_documents({"doc_id": doc_id})
+        except Exception as e:
+            print(f"Error getting document action count: {e}")
+            return 0
 
 
 _document_repository = None

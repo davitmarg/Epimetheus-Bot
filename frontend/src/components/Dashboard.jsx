@@ -1,7 +1,15 @@
 import React, { useState, useEffect } from 'react';
 
-import { FileText, MessageSquare, Settings, History, Plus, RefreshCw, AlertCircle, CheckCircle, Clock, Zap, Copy, X } from 'lucide-react';
+import { FileText, MessageSquare, Settings, History, RefreshCw, AlertCircle, CheckCircle, Clock, Zap, Copy, X } from 'lucide-react';
 import EpimetheusLogo from './EpimetheusLogo';
+import { 
+  getChannelsData, 
+  forceUpdate, 
+  revertVersion, 
+  getVersionHistory,
+  getMessageCount,
+  syncDriveFolder
+} from '../utils/api';
 
 // Generate a unique user ID
 const generateUserId = () => {
@@ -18,96 +26,75 @@ const getUserId = () => {
   return userId;
 };
 
-// Load channels from localStorage
-const loadChannels = (userId) => {
-  const stored = localStorage.getItem(`epimetheus_channels_${userId}`);
-  if (stored) {
-    return JSON.parse(stored);
-  }
-  // Return default demo data
-  return [
-    {
-      id: 1,
-      name: '#engineering-docs',
-      status: 'active',
-      messageCount: 247,
-      lastUpdate: '2 hours ago',
-      docUrl: 'https://docs.google.com/document/d/example1',
-      threshold: 10000,
-      currentChars: 7234,
-      slackChannelId: '',
-      versions: [
-        { version: 3, timestamp: Date.now() - 10800000, charsAdded: 2340 },
-        { version: 2, timestamp: Date.now() - 21600000, charsAdded: 1890 },
-        { version: 1, timestamp: Date.now() - 32400000, charsAdded: 1520 }
-      ]
-    },
-    {
-      id: 2,
-      name: '#product-specs',
-      status: 'active',
-      messageCount: 156,
-      lastUpdate: '5 hours ago',
-      docUrl: 'https://docs.google.com/document/d/example2',
-      threshold: 10000,
-      currentChars: 3421,
-      slackChannelId: '',
-      versions: [
-        { version: 2, timestamp: Date.now() - 18000000, charsAdded: 2100 },
-        { version: 1, timestamp: Date.now() - 36000000, charsAdded: 1321 }
-      ]
-    }
-  ];
-};
-
-// Save channels to localStorage
-const saveChannels = (userId, channels) => {
-  localStorage.setItem(`epimetheus_channels_${userId}`, JSON.stringify(channels));
-};
 
 export default function EpimetheusDashboard() {
   const [userId] = useState(() => getUserId());
   const [activeTab, setActiveTab] = useState('dashboard');
-  const [channels, setChannels] = useState(() => loadChannels(userId));
-  const [showAddChannel, setShowAddChannel] = useState(false);
+  const [channels, setChannels] = useState([]);
   const [selectedChannelForHistory, setSelectedChannelForHistory] = useState(null);
-  const [defaultThreshold, setDefaultThreshold] = useState(() => {
-    const stored = localStorage.getItem(`epimetheus_threshold_${userId}`);
-    return stored ? parseInt(stored, 10) : 10000;
-  });
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [refreshing, setRefreshing] = useState(false);
+  const [totalMessageCount, setTotalMessageCount] = useState(0);
 
-  // Save channels whenever they change
+  // Fetch channels from API on mount
   useEffect(() => {
-    saveChannels(userId, channels);
-  }, [channels, userId]);
+    fetchChannels();
+  }, []);
 
-  // Save threshold when it changes
-  useEffect(() => {
-    localStorage.setItem(`epimetheus_threshold_${userId}`, defaultThreshold.toString());
-  }, [defaultThreshold, userId]);
+
+  const fetchChannels = async () => {
+    try {
+      setLoading(true);
+      setError(null);
+      const [channelsData, messageCountData] = await Promise.all([
+        getChannelsData(),
+        getMessageCount()
+      ]);
+      setChannels(channelsData);
+      setTotalMessageCount(messageCountData.count || 0);
+    } catch (err) {
+      console.error('Error fetching channels:', err);
+      setError('Failed to load channels. Please check if the backend API is running.');
+      // Keep empty array on error
+      setChannels([]);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const refreshChannels = async () => {
+    setRefreshing(true);
+    await fetchChannels();
+    setRefreshing(false);
+  };
+
+  const handleResyncDrive = async () => {
+    try {
+      setRefreshing(true);
+      await syncDriveFolder();
+      // Refresh channels after sync
+      await fetchChannels();
+      alert('Google Drive documents synced successfully!');
+    } catch (err) {
+      console.error('Error syncing Drive:', err);
+      alert(`Failed to sync Drive: ${err.message}`);
+    } finally {
+      setRefreshing(false);
+    }
+  };
 
   const handleForceUpdate = async (channelId) => {
-    // TODO: Connect to backend API
-    // For now, simulate the update
-    setChannels(prev => prev.map(ch => {
-      if (ch.id === channelId) {
-        return {
-          ...ch,
-          currentChars: 0,
-          lastUpdate: 'just now',
-          messageCount: ch.messageCount + 1,
-          versions: [
-            {
-              version: (ch.versions?.[0]?.version || 0) + 1,
-              timestamp: Date.now(),
-              charsAdded: ch.currentChars
-            },
-            ...(ch.versions || [])
-          ]
-        };
-      }
-      return ch;
-    }));
+    try {
+      await forceUpdate(channelId);
+      // Refresh the channel data to get updated information
+      const updatedChannels = await getChannelsData();
+      setChannels(updatedChannels);
+      alert('Document update triggered successfully!');
+    } catch (err) {
+      console.error('Error forcing update:', err);
+      alert(`Failed to trigger update: ${err.message}`);
+    }
   };
 
   const handleRevert = (channelId) => {
@@ -115,30 +102,28 @@ export default function EpimetheusDashboard() {
     setActiveTab('history');
   };
 
-  const handleRevertVersion = async (channelId, version) => {
-    // TODO: Connect to backend API
-    alert(`Reverting channel ${channelId} to version ${version}...`);
+  const handleRevertVersion = async (channelId, version, versionId) => {
+    if (!confirm(`Are you sure you want to revert to version ${version}?`)) {
+      return;
+    }
+    try {
+      // Use versionId (UUID) if available, otherwise fall back to version number
+      const idToUse = versionId || version.toString();
+      await revertVersion(channelId, idToUse);
+      // Refresh channels to get updated data
+      await fetchChannels();
+      alert(`Successfully reverted to version ${version}`);
+    } catch (err) {
+      console.error('Error reverting version:', err);
+      alert(`Failed to revert version: ${err.message}`);
+    }
   };
 
-  const handleAddChannel = (formData) => {
-    const newChannel = {
-      id: Date.now(),
-      name: formData.channelName,
-      status: 'active',
-      messageCount: 0,
-      lastUpdate: 'never',
-      docUrl: formData.docUrl,
-      threshold: defaultThreshold,
-      currentChars: 0,
-      slackChannelId: formData.slackChannelId || '',
-      versions: []
-    };
-    setChannels(prev => [...prev, newChannel]);
-    setShowAddChannel(false);
-  };
 
   const handleDeleteChannel = (channelId) => {
-    if (confirm('Are you sure you want to remove this channel?')) {
+    // Note: This only removes from local view. The document will reappear on refresh
+    // since there's no delete endpoint in the backend API.
+    if (confirm('Are you sure you want to remove this channel from view?')) {
       setChannels(prev => prev.filter(ch => ch.id !== channelId));
     }
   };
@@ -189,21 +174,49 @@ export default function EpimetheusDashboard() {
 
           </div>
 
-          <button 
+          <div className="flex items-center gap-2">
 
-            onClick={() => setShowAddChannel(true)}
+            <button 
 
-            className="text-white px-4 py-2 rounded font-medium flex items-center gap-2 transition-colors hover:opacity-90"
+              onClick={refreshChannels}
 
-            style={{ backgroundColor: '#611f69' }}
+              disabled={refreshing || loading}
 
-          >
+              className="text-white px-4 py-2 rounded font-medium flex items-center gap-2 transition-colors hover:opacity-90 disabled:opacity-50"
 
-            <Plus className="w-4 h-4" />
+              style={{ backgroundColor: '#611f69' }}
 
-            Add Channel
+              title="Refresh documents"
 
-          </button>
+            >
+
+              <RefreshCw className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} />
+
+              Refresh
+
+            </button>
+
+            <button 
+
+              onClick={handleResyncDrive}
+
+              disabled={refreshing || loading}
+
+              className="text-white px-4 py-2 rounded font-medium flex items-center gap-2 transition-colors hover:opacity-90 disabled:opacity-50 border"
+
+              style={{ backgroundColor: '#2C2C2C', borderColor: '#3F0E40' }}
+
+              title="Resync Google Drive documents"
+
+            >
+
+              <RefreshCw className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} />
+
+              Resync Drive
+
+            </button>
+
+          </div>
 
         </div>
 
@@ -267,7 +280,57 @@ export default function EpimetheusDashboard() {
 
           <div className="space-y-6">
 
-            {/* Stats Cards */}
+            {/* Error Message */}
+
+            {error && (
+
+              <div className="rounded-lg p-4 border flex items-center gap-3" style={{ backgroundColor: '#E01E5A20', borderColor: '#E01E5A40' }}>
+
+                <AlertCircle className="w-5 h-5" style={{ color: '#E01E5A' }} />
+
+                <div className="flex-1">
+
+                  <p className="text-white font-medium">Error loading channels</p>
+
+                  <p className="text-sm" style={{ color: '#D1D2D3' }}>{error}</p>
+
+                </div>
+
+                <button
+
+                  onClick={fetchChannels}
+
+                  className="text-white px-3 py-1 rounded text-sm font-medium transition-colors hover:opacity-90"
+
+                  style={{ backgroundColor: '#611f69' }}
+
+                >
+
+                  Retry
+
+                </button>
+
+              </div>
+
+            )}
+
+            {/* Loading State */}
+
+            {loading && !error && (
+
+              <div className="rounded-lg p-12 border text-center" style={{ backgroundColor: '#2C2C2C', borderColor: '#3F0E40' }}>
+
+                <RefreshCw className="w-12 h-12 mx-auto mb-4 animate-spin" style={{ color: '#8B5FBF' }} />
+
+                <p className="text-white">Loading channels...</p>
+
+              </div>
+
+            )}
+
+            {/* Stats Cards - Only show when not loading */}
+
+            {!loading && (
 
             <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
 
@@ -283,11 +346,11 @@ export default function EpimetheusDashboard() {
 
                 <div className="text-3xl font-bold text-white">
 
-                  {channels.reduce((sum, ch) => sum + ch.messageCount, 0).toLocaleString()}
+                  {totalMessageCount.toLocaleString()}
 
                 </div>
 
-                <div className="text-sm mt-1" style={{ color: '#9CA3AF' }}>Across all channels</div>
+                <div className="text-sm mt-1" style={{ color: '#9CA3AF' }}>Total messages received</div>
 
               </div>
 
@@ -299,7 +362,7 @@ export default function EpimetheusDashboard() {
 
                   <FileText className="w-5 h-5" style={{ color: '#8B5FBF' }} />
 
-                  <span className="text-sm" style={{ color: '#D1D2D3' }}>Active Channels</span>
+                  <span className="text-sm" style={{ color: '#D1D2D3' }}>Active Documents</span>
 
                 </div>
 
@@ -307,7 +370,7 @@ export default function EpimetheusDashboard() {
 
                 <div className="text-sm mt-1" style={{ color: '#9CA3AF' }}>
 
-                  {channels.filter(ch => ch.status === 'active').length} monitoring
+                  {channels.filter(ch => ch.status === 'active').length} documents
 
                 </div>
 
@@ -337,13 +400,15 @@ export default function EpimetheusDashboard() {
 
             </div>
 
-
+            )}
 
             {/* Channel List */}
 
+            {!loading && (
+
             <div className="space-y-4">
 
-              <h2 className="text-xl font-semibold text-white">Active Channels</h2>
+              <h2 className="text-xl font-semibold text-white">Active Documents</h2>
 
               {channels.length === 0 ? (
 
@@ -351,25 +416,9 @@ export default function EpimetheusDashboard() {
 
                   <MessageSquare className="w-16 h-16 mx-auto mb-4 opacity-50" style={{ color: '#9CA3AF' }} />
 
-                  <h3 className="text-lg font-semibold text-white mb-2">No channels yet</h3>
+                  <h3 className="text-lg font-semibold text-white mb-2">No documents yet</h3>
 
-                  <p className="mb-6" style={{ color: '#D1D2D3' }}>Get started by adding your first Slack channel to track.</p>
-
-                  <button
-
-                    onClick={() => setShowAddChannel(true)}
-
-                    className="text-white px-6 py-3 rounded font-medium flex items-center gap-2 transition-colors hover:opacity-90 mx-auto"
-
-                    style={{ backgroundColor: '#611f69' }}
-
-                  >
-
-                    <Plus className="w-5 h-5" />
-
-                    Add Your First Channel
-
-                  </button>
+                  <p className="mb-6" style={{ color: '#D1D2D3' }}>Use "Resync Drive" to load documents from your Google Drive folder.</p>
 
                 </div>
 
@@ -481,37 +530,21 @@ export default function EpimetheusDashboard() {
 
 
 
-                  {/* Progress Bar */}
-
-                  <div className="space-y-2">
-
-                    <div className="flex items-center justify-between text-sm">
-
-                      <span style={{ color: '#D1D2D3' }}>Progress to next update</span>
-
-                      <span className="text-white font-mono">
-
-                        {channel.currentChars.toLocaleString()} / {channel.threshold.toLocaleString()} chars
-
+                  {/* Action Count */}
+                  <div className="rounded-lg p-4 border" style={{ backgroundColor: '#1D1C1D', borderColor: '#3F0E40' }}>
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <Zap className="w-4 h-4" style={{ color: '#8B5FBF' }} />
+                        <span className="text-sm" style={{ color: '#D1D2D3' }}>Actions/Changes</span>
+                      </div>
+                      <span className="text-xl font-bold text-white">
+                        {channel.actionCount || channel.versions?.length || 0}
                       </span>
-
                     </div>
-
-                    <div className="w-full rounded-full h-2 overflow-hidden" style={{ backgroundColor: '#3F0E40' }}>
-
-                      <div
-
-                        className="h-full rounded-full transition-all duration-500"
-
-                        style={{ width: `${(channel.currentChars / channel.threshold) * 100}%`, backgroundColor: '#8B5FBF' }}
-
-                      />
-
-                    </div>
-
+                    <p className="text-xs mt-1" style={{ color: '#9CA3AF' }}>
+                      Document has been updated {channel.actionCount || channel.versions?.length || 0} time{channel.actionCount !== 1 ? 's' : ''}
+                    </p>
                   </div>
-
-
 
                   {/* Stats */}
 
@@ -540,6 +573,8 @@ export default function EpimetheusDashboard() {
               )))}
 
             </div>
+
+            )}
 
           </div>
 
@@ -677,7 +712,7 @@ export default function EpimetheusDashboard() {
 
                       <button
 
-                        onClick={() => handleRevertVersion(version.channelId, version.version)}
+                        onClick={() => handleRevertVersion(version.channelId, version.version, version.versionId)}
 
                         className="text-white px-3 py-1.5 rounded text-sm font-medium transition-colors hover:opacity-90"
 
@@ -712,36 +747,6 @@ export default function EpimetheusDashboard() {
             <h2 className="text-2xl font-semibold text-white mb-6">Settings</h2>
 
             <div className="space-y-6">
-
-              <div>
-
-                <label className="block text-sm font-medium mb-2" style={{ color: '#D1D2D3' }}>
-
-                  Default Character Threshold
-
-                </label>
-
-                <input
-
-                  type="number"
-
-                  value={defaultThreshold}
-
-                  onChange={(e) => setDefaultThreshold(parseInt(e.target.value, 10) || 10000)}
-
-                  min="1000"
-
-                  step="1000"
-
-                  className="rounded-lg px-4 py-2 text-white w-full focus:outline-none focus:ring-2"
-
-                  style={{ backgroundColor: '#1D1C1D', borderColor: '#3F0E40', borderWidth: '1px', focusRingColor: '#8B5FBF' }}
-
-                />
-
-                <p className="text-sm mt-1" style={{ color: '#9CA3AF' }}>Number of characters before auto-update (applies to new channels)</p>
-
-              </div>
 
               <div>
 
@@ -819,17 +824,6 @@ export default function EpimetheusDashboard() {
 
 
 
-      {/* Add Channel Modal */}
-
-      {showAddChannel && <AddChannelModal
-
-        onClose={() => setShowAddChannel(false)}
-
-        onAdd={handleAddChannel}
-
-        defaultThreshold={defaultThreshold}
-
-      />}
 
     </div>
 
@@ -837,179 +831,4 @@ export default function EpimetheusDashboard() {
 
 }
 
-// Add Channel Modal Component
-function AddChannelModal({ onClose, onAdd, defaultThreshold }) {
-  const [formData, setFormData] = useState({
-    channelName: '',
-    docUrl: '',
-    slackChannelId: '',
-    threshold: defaultThreshold
-  });
-  const [errors, setErrors] = useState({});
-  const [isSubmitting, setIsSubmitting] = useState(false);
-
-  const validateForm = () => {
-    const newErrors = {};
-    if (!formData.channelName.trim()) {
-      newErrors.channelName = 'Channel name is required';
-    } else if (!formData.channelName.startsWith('#')) {
-      newErrors.channelName = 'Channel name should start with #';
-    }
-    if (!formData.docUrl.trim()) {
-      newErrors.docUrl = 'Google Doc URL is required';
-    } else if (!formData.docUrl.includes('docs.google.com')) {
-      newErrors.docUrl = 'Please enter a valid Google Docs URL';
-    }
-    if (formData.threshold < 1000) {
-      newErrors.threshold = 'Threshold must be at least 1000 characters';
-    }
-    setErrors(newErrors);
-    return Object.keys(newErrors).length === 0;
-  };
-
-  const handleSubmit = (e) => {
-    e.preventDefault();
-    if (validateForm()) {
-      setIsSubmitting(true);
-      // Simulate API call
-      setTimeout(() => {
-        onAdd(formData);
-        setIsSubmitting(false);
-      }, 300);
-    }
-  };
-
-  return (
-    <div className="fixed inset-0 backdrop-blur-sm flex items-center justify-center p-4 z-50" style={{ backgroundColor: 'rgba(0, 0, 0, 0.7)' }} onClick={onClose}>
-      <div className="rounded-xl p-6 max-w-lg w-full border" style={{ backgroundColor: '#2C2C2C', borderColor: '#3F0E40' }} onClick={(e) => e.stopPropagation()}>
-        <div className="flex items-center justify-between mb-4">
-          <h3 className="text-xl font-semibold text-white">Add Slack Channel</h3>
-          <button
-            onClick={onClose}
-            className="transition-colors hover:opacity-80"
-            style={{ color: '#D1D2D3' }}
-          >
-            <X className="w-5 h-5" />
-          </button>
-        </div>
-
-        <form onSubmit={handleSubmit} className="space-y-4">
-          <div>
-            <label className="block text-sm font-medium mb-2" style={{ color: '#D1D2D3' }}>
-              Slack Channel Name <span style={{ color: '#E01E5A' }}>*</span>
-            </label>
-            <input
-              type="text"
-              placeholder="#channel-name"
-              value={formData.channelName}
-              onChange={(e) => setFormData({ ...formData, channelName: e.target.value })}
-              className={`rounded-lg px-4 py-2 text-white w-full focus:outline-none focus:ring-2`}
-              style={{ 
-                backgroundColor: '#1D1C1D', 
-                borderColor: errors.channelName ? '#E01E5A' : '#3F0E40', 
-                borderWidth: '1px',
-                focusRingColor: '#8B5FBF'
-              }}
-            />
-            {errors.channelName && (
-              <p className="text-sm mt-1" style={{ color: '#E01E5A' }}>{errors.channelName}</p>
-            )}
-            <p className="text-xs mt-1" style={{ color: '#9CA3AF' }}>The Slack channel name (e.g., #engineering-docs)</p>
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium mb-2" style={{ color: '#D1D2D3' }}>
-              Google Doc URL <span style={{ color: '#E01E5A' }}>*</span>
-            </label>
-            <input
-              type="url"
-              placeholder="https://docs.google.com/document/d/..."
-              value={formData.docUrl}
-              onChange={(e) => setFormData({ ...formData, docUrl: e.target.value })}
-              className={`rounded-lg px-4 py-2 text-white w-full focus:outline-none focus:ring-2`}
-              style={{ 
-                backgroundColor: '#1D1C1D', 
-                borderColor: errors.docUrl ? '#E01E5A' : '#3F0E40', 
-                borderWidth: '1px',
-                focusRingColor: '#8B5FBF'
-              }}
-            />
-            {errors.docUrl && (
-              <p className="text-sm mt-1" style={{ color: '#E01E5A' }}>{errors.docUrl}</p>
-            )}
-            <p className="text-xs mt-1" style={{ color: '#9CA3AF' }}>The Google Doc that will be automatically updated</p>
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium mb-2" style={{ color: '#D1D2D3' }}>
-              Character Threshold
-            </label>
-            <input
-              type="number"
-              value={formData.threshold}
-              onChange={(e) => setFormData({ ...formData, threshold: parseInt(e.target.value, 10) || 10000 })}
-              min="1000"
-              step="1000"
-              className={`rounded-lg px-4 py-2 text-white w-full focus:outline-none focus:ring-2`}
-              style={{ 
-                backgroundColor: '#1D1C1D', 
-                borderColor: errors.threshold ? '#E01E5A' : '#3F0E40', 
-                borderWidth: '1px',
-                focusRingColor: '#8B5FBF'
-              }}
-            />
-            {errors.threshold && (
-              <p className="text-sm mt-1" style={{ color: '#E01E5A' }}>{errors.threshold}</p>
-            )}
-            <p className="text-xs mt-1" style={{ color: '#9CA3AF' }}>Number of characters before auto-update (default: {defaultThreshold.toLocaleString()})</p>
-          </div>
-
-          <div className="rounded-lg p-3 mt-4 border" style={{ backgroundColor: '#1D1C1D', borderColor: '#8B5FBF40' }}>
-            <div className="flex items-start gap-2">
-              <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" style={{ color: '#8B5FBF' }} />
-              <div className="text-xs" style={{ color: '#8B5FBF' }}>
-                <p className="font-medium mb-1">Integration Steps:</p>
-                <ol className="list-decimal list-inside space-y-1" style={{ color: '#D1D2D3' }}>
-                  <li>Add the Epimetheus bot to your Slack workspace</li>
-                  <li>Invite the bot to the channel you want to track</li>
-                  <li>Ensure the Google Doc is accessible to the bot</li>
-                </ol>
-              </div>
-            </div>
-          </div>
-
-          <div className="flex gap-3 mt-6">
-            <button
-              type="button"
-              onClick={onClose}
-              className="flex-1 text-white px-4 py-2 rounded font-medium transition-colors border hover:opacity-80 disabled:opacity-50"
-              style={{ backgroundColor: '#2C2C2C', borderColor: '#3F0E40' }}
-              disabled={isSubmitting}
-            >
-              Cancel
-            </button>
-            <button
-              type="submit"
-              className="flex-1 text-white px-4 py-2 rounded font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 hover:opacity-90"
-              style={{ backgroundColor: '#611f69' }}
-              disabled={isSubmitting}
-            >
-              {isSubmitting ? (
-                <>
-                  <RefreshCw className="w-4 h-4 animate-spin" />
-                  Adding...
-                </>
-              ) : (
-                <>
-                  <Plus className="w-4 h-4" />
-                  Add Channel
-                </>
-              )}
-            </button>
-          </div>
-        </form>
-      </div>
-    </div>
-  );
-}
 

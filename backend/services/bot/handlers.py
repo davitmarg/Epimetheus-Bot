@@ -1,8 +1,10 @@
+import logging
 from typing import Dict, Any
 from services.bot.app import slack_app
 from services.bot.buffer import buffer
 from services.bot import ui
 from repository.llm_repository import get_agentic_repository
+from repository.document_repository import get_document_repository
 from utils.message_utils import extract_message_text
 from utils.constants import (
     LOADING_EMOJI,
@@ -28,6 +30,30 @@ def handle_message(event: Dict[str, Any], body: Dict[str, Any], ack):
     # Ignore bot messages (including our own)
     if event.get("bot_id"):
         return
+
+    team_id = body.get("team_id")
+    if not team_id:
+        return
+
+    # Store message in MongoDB (do this before any early returns)
+    try:
+        document_repo = get_document_repository()
+        if document_repo is None:
+            logging.error(f"✗ ERROR: document_repository is None, cannot save message")
+            logging.error(f"   Event: {event}")
+        else:
+            message_data = {**event, "team_id": team_id}
+            success = document_repo.save_message(message_data)
+            if not success:
+                logging.error(f"✗ ERROR: save_message returned False")
+                logging.error(f"   Event: {event}")
+                logging.error(f"   Message data: {message_data}")
+    except Exception as e:
+        # Don't fail if message storage fails, but log the error
+        import traceback
+        logging.error(f"✗ EXCEPTION: Failed to store message in MongoDB: {e}")
+        logging.error(f"   Event: {event}")
+        logging.error(f"   Traceback:\n{traceback.format_exc()}")
 
     # Fallback: Check if message contains bot mention
     # Sometimes app_mention events don't come through, so check message text
@@ -70,10 +96,6 @@ def handle_message(event: Dict[str, Any], body: Dict[str, Any], ack):
         except Exception:
             pass
 
-    team_id = body.get("team_id")
-    if not team_id:
-        return
-
     # Send to buffer/queue for log-based processing
     try:
         buffer.ingest(event, team_id)
@@ -101,6 +123,34 @@ def handle_app_mention(event: Dict[str, Any], body: Dict[str, Any], say, ack, cl
     if not channel or not team_id:
         return
 
+    # Store mention message in MongoDB (save before any processing or early returns)
+    try:
+        document_repo = get_document_repository()
+        if document_repo is None:
+            logging.error(f"✗ ERROR: document_repository is None, cannot save mention message")
+            logging.error(f"   Event: {event}")
+        else:
+            message_data = {**event, "team_id": team_id}
+            success = document_repo.save_message(message_data)
+            if not success:
+                logging.error(f"✗ ERROR: save_message returned False for mention")
+                logging.error(f"   Event: {event}")
+                logging.error(f"   Message data: {message_data}")
+    except Exception as e:
+        # Don't fail if message storage fails, but log the error
+        import traceback
+        logging.error(f"✗ EXCEPTION: Failed to store mention message in MongoDB: {e}")
+        logging.error(f"   Event: {event}")
+        logging.error(f"   Traceback:\n{traceback.format_exc()}")
+
+    # Get bot_id for saving responses
+    bot_id = None
+    try:
+        bot_info = client.auth_test()
+        bot_id = bot_info.get("user_id")
+    except Exception:
+        pass
+
     # Add loading reaction immediately
     ui.add_loading_reaction(channel, event_ts, client)
 
@@ -111,7 +161,7 @@ def handle_app_mention(event: Dict[str, Any], body: Dict[str, Any], say, ack, cl
         if not message_text or not message_text.strip():
             reply_text = DEFAULT_GREETING_MESSAGE
             ui.replace_reaction(channel, event_ts, LOADING_EMOJI, SUCCESS_EMOJI, client)
-            ui.send_reply(channel, thread_ts, reply_text, say, client)
+            ui.send_reply(channel, thread_ts, reply_text, say, client, team_id=team_id, bot_id=bot_id)
             return
 
         # Process mention using agentic repository
@@ -129,7 +179,7 @@ def handle_app_mention(event: Dict[str, Any], body: Dict[str, Any], say, ack, cl
             reply_text = DEFAULT_PROCESSING_ERROR_MESSAGE
 
         # Send reply
-        ui.send_reply(channel, thread_ts, reply_text, say, client)
+        ui.send_reply(channel, thread_ts, reply_text, say, client, team_id=team_id, bot_id=bot_id)
 
         # Replace loading reaction with checkmark
         ui.replace_reaction(channel, event_ts, LOADING_EMOJI, SUCCESS_EMOJI, client)
@@ -137,4 +187,4 @@ def handle_app_mention(event: Dict[str, Any], body: Dict[str, Any], say, ack, cl
     except Exception as e:
         ui.replace_reaction(channel, event_ts, LOADING_EMOJI, ERROR_EMOJI, client)
         error_reply = f"{DEFAULT_ERROR_MESSAGE} Error: {str(e)}"
-        ui.send_reply(channel, thread_ts, error_reply, say, client)
+        ui.send_reply(channel, thread_ts, error_reply, say, client, team_id=team_id, bot_id=bot_id)

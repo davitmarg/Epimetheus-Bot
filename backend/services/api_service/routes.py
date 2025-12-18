@@ -87,6 +87,52 @@ async def get_status():
     }
 
 
+@router.get("/messages/count")
+async def get_message_count(
+    team_id: Optional[str] = Query(None, description="Filter by team ID")
+):
+    """Get total count of messages stored in MongoDB."""
+    try:
+        count = document_repo.get_total_message_count(team_id)
+        return {"count": count, "team_id": team_id}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Error getting message count: {exc}")
+
+
+@router.get("/messages/test")
+async def test_message_save():
+    """Test endpoint to verify message saving works"""
+    try:
+        import time
+        test_message = {
+            "ts": str(time.time()),
+            "channel": "test_channel",
+            "team_id": "test_team",
+            "user": "test_user",
+            "text": "Test message from API endpoint",
+            "bot_id": None
+        }
+        
+        # Get diagnostics
+        diagnostics = document_repo.check_mongodb_connection()
+        
+        # Try to save
+        success = document_repo.save_message(test_message)
+        
+        return {
+            "success": success,
+            "diagnostics": diagnostics,
+            "test_message": test_message
+        }
+    except Exception as exc:
+        import traceback
+        return {
+            "success": False,
+            "error": str(exc),
+            "traceback": traceback.format_exc()
+        }
+
+
 @router.get("/documents")
 async def list_documents(
     folder_id: Optional[str] = Query(None, description="Filter by folder ID")

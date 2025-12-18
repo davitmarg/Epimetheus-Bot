@@ -121,7 +121,9 @@ def update_documentation_with_information(
     information: str,
     doc_id: Optional[str] = None,
     channel: Optional[str] = None,
-    thread_ts: Optional[str] = None
+    thread_ts: Optional[str] = None,
+    team_id: Optional[str] = None,
+    bot_id: Optional[str] = None
 ) -> str:
     """
     Update documentation with new information provided by the user.
@@ -133,6 +135,8 @@ def update_documentation_with_information(
         doc_id: Optional specific document ID to update. If not provided, will find the most relevant document.
         channel: Optional Slack channel ID for notifications
         thread_ts: Optional Slack thread timestamp for notifications
+        team_id: Optional team ID for saving bot responses
+        bot_id: Optional bot user ID for saving bot responses
     
     Returns:
         Confirmation message about the update with document details
@@ -151,7 +155,7 @@ def update_documentation_with_information(
         
         # Determine target document if not specified
         if not doc_id:
-            target_doc_ids = document_repo.determine_target_documents(messages, team_id="default")
+            target_doc_ids = document_repo.determine_target_documents(messages, team_id=team_id or "default")
             if not target_doc_ids:
                 return "I couldn't determine which document to update. Please specify a document ID or ensure documents exist in the system."
             doc_id = target_doc_ids[0]
@@ -173,7 +177,9 @@ def update_documentation_with_information(
                     doc_name=result["doc_name"] or "Unknown Document",
                     message_count=result["message_count"],
                     success=True,
-                    change_summary=result.get("change_summary")
+                    change_summary=result.get("change_summary"),
+                    team_id=team_id,
+                    bot_id=bot_id
                 )
             
             # Return result data for agent to format
@@ -608,6 +614,17 @@ class EpimetheusAgent:
         channel = event.get("channel")
         thread_ts = event.get("thread_ts") or event.get("ts")
         
+        # Get bot_id for saving responses
+        bot_id = None
+        try:
+            from repository.slack_repository import get_slack_repository
+            slack_repo = get_slack_repository()
+            if slack_repo:
+                bot_info = slack_repo.client.auth_test()
+                bot_id = bot_info.get("user_id")
+        except Exception:
+            pass
+        
         # Import prompt function
         from repository.llm_repository.prompts import agent_system_prompt
         
@@ -654,10 +671,12 @@ class EpimetheusAgent:
                 
                 if tool_func:
                     try:
-                        # Add channel and thread_ts to tool args for tools that support notifications
+                        # Add channel, thread_ts, team_id, and bot_id to tool args for tools that support notifications
                         if tool_name in ["update_documentation_with_information", "update_document_formatting", "update_document_partial"]:
                             tool_args["channel"] = channel
                             tool_args["thread_ts"] = thread_ts
+                            tool_args["team_id"] = team_id
+                            tool_args["bot_id"] = bot_id
                         
                         # Execute tool
                         result = tool_func.invoke(tool_args)

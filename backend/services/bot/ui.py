@@ -1,5 +1,7 @@
+import logging
 from typing import Optional, Any
 from repository.slack_repository import get_slack_repository
+from repository.document_repository import get_document_repository
 from utils.constants import LOADING_EMOJI, DEFAULT_NO_RESPONSE_MESSAGE
 
 
@@ -9,9 +11,12 @@ def send_reply(
     text: str,
     say: Optional[Any] = None,
     client: Optional[Any] = None,
+    team_id: Optional[str] = None,
+    bot_id: Optional[str] = None,
 ) -> bool:
     """
     Send reply using say, client, or slack_repo.
+    Also saves the bot response to MongoDB.
 
     Returns:
         True if successful, False otherwise
@@ -19,36 +24,93 @@ def send_reply(
     if not text or not text.strip():
         text = DEFAULT_NO_RESPONSE_MESSAGE
 
+    response_ts = None
+    success = False
+
     # Try say() first (Slack Bolt's built-in method)
     if say:
         try:
-            say(text=text, thread_ts=thread_ts)
-            return True
+            result = say(text=text, thread_ts=thread_ts)
+            if result:
+                # Extract ts from result if available
+                if isinstance(result, dict) and result.get("ok"):
+                    response_ts = result.get("ts")
+                success = True
         except Exception:
             pass
 
     # Try client directly
-    if client:
+    if not success and client:
         try:
             response = client.chat_postMessage(
                 channel=channel, thread_ts=thread_ts, text=text
             )
             if response.get("ok"):
-                return True
+                response_ts = response.get("ts")
+                success = True
         except Exception:
             pass
 
     # Fallback to slack_repo
-    slack_repo = get_slack_repository()
-    if slack_repo:
-        try:
-            return slack_repo.send_reply(
-                channel=channel, thread_ts=thread_ts, text=text
-            )
-        except Exception:
-            pass
+    if not success:
+        slack_repo = get_slack_repository()
+        if slack_repo:
+            try:
+                result = slack_repo.send_reply(
+                    channel=channel, thread_ts=thread_ts, text=text, team_id=team_id, bot_id=bot_id
+                )
+                if result:
+                    success = True
+            except Exception:
+                pass
 
-    return False
+    # Save bot response to MongoDB if we have the necessary info
+    if success and team_id and channel:
+        try:
+            # Get bot_id if not provided
+            if not bot_id and client:
+                try:
+                    bot_info = client.auth_test()
+                    bot_id = bot_info.get("user_id")
+                except Exception:
+                    pass
+            
+            if bot_id:
+                # Generate timestamp if not available from response
+                import time
+                if not response_ts:
+                    response_ts = str(time.time())
+                
+                document_repo = get_document_repository()
+                if document_repo is None:
+                    logging.error(f"✗ ERROR: document_repository is None, cannot save bot response")
+                    logging.error(f"   Channel: {channel}, Thread: {thread_ts}, Text: {text[:50]}...")
+                else:
+                    message_data = {
+                        "ts": response_ts,
+                        "channel": channel,
+                        "team_id": team_id,
+                        "user": bot_id,  # Bot user ID
+                        "text": text,
+                        "thread_ts": thread_ts,
+                        "bot_id": bot_id,
+                    }
+                    success = document_repo.save_message(message_data)
+                    if not success:
+                        logging.error(f"✗ ERROR: save_message returned False for bot response")
+                        logging.error(f"   Channel: {channel}, Thread: {thread_ts}")
+                        logging.error(f"   Message data: {message_data}")
+            else:
+                logging.warning(f"⚠ WARNING: Cannot save bot response - bot_id is None")
+                logging.warning(f"   Channel: {channel}, Thread: {thread_ts}")
+        except Exception as e:
+            # Don't fail if message storage fails, but log the error
+            import traceback
+            logging.error(f"✗ EXCEPTION: Failed to store bot response in MongoDB: {e}")
+            logging.error(f"   Channel: {channel}, Thread: {thread_ts}, Text: {text[:50]}...")
+            logging.error(f"   Traceback:\n{traceback.format_exc()}")
+
+    return success
 
 
 def add_loading_reaction(
