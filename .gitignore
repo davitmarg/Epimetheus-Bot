@@ -6,6 +6,9 @@
 .vscode/*
 .idea/*
 
+
+**/node_modules/** */
+
 # Credentials and secrets
 credentials.json
 *.credentials.json
@@ -124,3 +127,19 @@ local_settings.py
 # Backup files
 *.bak
 *.backup
+
+
+**/node_modules/**
+node_modules
+npm-debug.log
+.git
+.gitignore
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+dist
+.DS_Store
+*.log
+

@@ -50,11 +50,11 @@ services:
     networks:
       - epimetheus-network
 
-  app:
+  backend:
     build:
-      context: .
+      context: backend/.
       dockerfile: Dockerfile
-    container_name: epimetheus-app
+    container_name: epimetheus-backend
     # Explicitly telling it to run main.py
     command: python main.py
     ports:
@@ -95,6 +95,19 @@ services:
       chromadb:
         # Changed from service_healthy to service_started because we removed the healthcheck
         condition: service_started
+    networks:
+      - epimetheus-network
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: frontend/.
+      dockerfile: Dockerfile
+    container_name: epimetheus-frontend
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
     networks:
       - epimetheus-network
     restart: unless-stopped
