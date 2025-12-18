@@ -32,10 +32,14 @@ export const getStatus = async () => {
 /**
  * Get total message count from MongoDB
  */
-export const getMessageCount = async (teamId = null) => {
+export const getMessageCount = async (teamId = null, channelId = null) => {
   try {
-    const url = teamId 
-      ? `${API_BASE_URL}/messages/count?team_id=${teamId}`
+    const params = new URLSearchParams();
+    if (teamId) params.append('team_id', teamId);
+    if (channelId) params.append('channel_id', channelId);
+    const queryString = params.toString();
+    const url = queryString 
+      ? `${API_BASE_URL}/messages/count?${queryString}`
       : `${API_BASE_URL}/messages/count`;
     const response = await fetch(url);
     if (!response.ok) throw new Error('Failed to fetch message count');
@@ -47,7 +51,7 @@ export const getMessageCount = async (teamId = null) => {
 };
 
 /**
- * Get all documents (channels)
+ * Get all documents
  */
 export const getDocuments = async (folderId = null) => {
   try {
@@ -278,9 +282,9 @@ export const getDriveMapping = async (folderId = null) => {
 
 /**
  * Get combined document data (documents + metadata + versions)
- * This combines multiple API calls to get complete channel information
+ * This combines multiple API calls to get complete document information
  */
-export const getChannelsData = async (folderId = null) => {
+export const getDocumentsData = async (folderId = null) => {
   try {
     // Fetch documents and metadata in parallel
     const [documentsResponse, metadataResponse] = await Promise.all([
@@ -300,7 +304,7 @@ export const getChannelsData = async (folderId = null) => {
     // Combine documents with metadata and fetch versions
     // Note: We don't fetch document content here as it's expensive.
     // Content length can be fetched on-demand when needed.
-    const channelsWithVersions = await Promise.all(
+    const documentsWithVersions = await Promise.all(
       documents.map(async (doc) => {
         const docId = doc.id || doc.doc_id;
         const metadata = metadataMap[docId] || {};
@@ -328,11 +332,23 @@ export const getChannelsData = async (folderId = null) => {
         const slackTag = metadata.tags?.find(t => typeof t === 'string' && t.startsWith('slack:'));
         const slackChannelId = slackTag ? slackTag.replace('slack:', '') : '';
 
+        // Fetch message count for this channel if we have a channel ID
+        let messageCount = 0;
+        if (slackChannelId) {
+          try {
+            const messageCountResponse = await getMessageCount(null, slackChannelId);
+            messageCount = messageCountResponse.count || 0;
+          } catch (error) {
+            // Silently fail - message count is optional
+            console.debug(`Could not fetch message count for channel ${slackChannelId}:`, error);
+          }
+        }
+
         return {
           id: docId,
           name: metadata.name || doc.name || `Document ${docId.substring(0, 8)}`,
           status: 'active',
-          messageCount: 0, // This would come from Slack integration
+          messageCount: messageCount,
           lastUpdate: doc.modified_time ? formatTimeAgo(new Date(doc.modified_time)) : 'never',
           docUrl: `https://docs.google.com/document/d/${docId}`,
           actionCount: versions.length, // Number of actions/changes (versions)
@@ -343,9 +359,9 @@ export const getChannelsData = async (folderId = null) => {
       })
     );
 
-    return channelsWithVersions;
+    return documentsWithVersions;
   } catch (error) {
-    console.error('Error fetching channels data:', error);
+    console.error('Error fetching documents data:', error);
     throw error;
   }
 };

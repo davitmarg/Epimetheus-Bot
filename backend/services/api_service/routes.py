@@ -89,12 +89,17 @@ async def get_status():
 
 @router.get("/messages/count")
 async def get_message_count(
-    team_id: Optional[str] = Query(None, description="Filter by team ID")
+    team_id: Optional[str] = Query(None, description="Filter by team ID"),
+    channel_id: Optional[str] = Query(None, description="Filter by channel ID")
 ):
     """Get total count of messages stored in MongoDB."""
     try:
-        count = document_repo.get_total_message_count(team_id)
-        return {"count": count, "team_id": team_id}
+        if channel_id:
+            count = document_repo.get_message_count_by_channel(channel_id, team_id)
+            return {"count": count, "team_id": team_id, "channel_id": channel_id}
+        else:
+            count = document_repo.get_total_message_count(team_id)
+            return {"count": count, "team_id": team_id}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Error getting message count: {exc}")
 

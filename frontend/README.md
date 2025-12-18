@@ -4,7 +4,7 @@ React-based admin dashboard for the Epimetheus Slack-to-Docs automation system.
 
 ## Features
 
-- View all tracked documents and channels
+- View all tracked documents
 - Monitor message processing status
 - Browse version history
 - Revert to previous document versions

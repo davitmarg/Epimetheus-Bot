@@ -3,7 +3,7 @@ import React, { useState, useEffect } from 'react';
 import { FileText, MessageSquare, Settings, History, RefreshCw, AlertCircle, CheckCircle, Clock, Zap, Copy, X } from 'lucide-react';
 import EpimetheusLogo from './EpimetheusLogo';
 import { 
-  getChannelsData, 
+  getDocumentsData, 
   forceUpdate, 
   revertVersion, 
   getVersionHistory,
@@ -30,42 +30,42 @@ const getUserId = () => {
 export default function EpimetheusDashboard() {
   const [userId] = useState(() => getUserId());
   const [activeTab, setActiveTab] = useState('dashboard');
-  const [channels, setChannels] = useState([]);
-  const [selectedChannelForHistory, setSelectedChannelForHistory] = useState(null);
+  const [documents, setDocuments] = useState([]);
+  const [selectedDocumentForHistory, setSelectedDocumentForHistory] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [refreshing, setRefreshing] = useState(false);
   const [totalMessageCount, setTotalMessageCount] = useState(0);
 
-  // Fetch channels from API on mount
+  // Fetch documents from API on mount
   useEffect(() => {
-    fetchChannels();
+    fetchDocuments();
   }, []);
 
 
-  const fetchChannels = async () => {
+  const fetchDocuments = async () => {
     try {
       setLoading(true);
       setError(null);
-      const [channelsData, messageCountData] = await Promise.all([
-        getChannelsData(),
+      const [documentsData, messageCountData] = await Promise.all([
+        getDocumentsData(),
         getMessageCount()
       ]);
-      setChannels(channelsData);
+      setDocuments(documentsData);
       setTotalMessageCount(messageCountData.count || 0);
     } catch (err) {
-      console.error('Error fetching channels:', err);
-      setError('Failed to load channels. Please check if the backend API is running.');
+      console.error('Error fetching documents:', err);
+      setError('Failed to load documents. Please check if the backend API is running.');
       // Keep empty array on error
-      setChannels([]);
+      setDocuments([]);
     } finally {
       setLoading(false);
     }
   };
 
-  const refreshChannels = async () => {
+  const refreshDocuments = async () => {
     setRefreshing(true);
-    await fetchChannels();
+    await fetchDocuments();
     setRefreshing(false);
   };
 
@@ -73,8 +73,8 @@ export default function EpimetheusDashboard() {
     try {
       setRefreshing(true);
       await syncDriveFolder();
-      // Refresh channels after sync
-      await fetchChannels();
+      // Refresh documents after sync
+      await fetchDocuments();
       alert('Google Drive documents synced successfully!');
     } catch (err) {
       console.error('Error syncing Drive:', err);
@@ -84,12 +84,12 @@ export default function EpimetheusDashboard() {
     }
   };
 
-  const handleForceUpdate = async (channelId) => {
+  const handleForceUpdate = async (documentId) => {
     try {
-      await forceUpdate(channelId);
-      // Refresh the channel data to get updated information
-      const updatedChannels = await getChannelsData();
-      setChannels(updatedChannels);
+      await forceUpdate(documentId);
+      // Refresh the document data to get updated information
+      const updatedDocuments = await getDocumentsData();
+      setDocuments(updatedDocuments);
       alert('Document update triggered successfully!');
     } catch (err) {
       console.error('Error forcing update:', err);
@@ -97,21 +97,21 @@ export default function EpimetheusDashboard() {
     }
   };
 
-  const handleRevert = (channelId) => {
-    setSelectedChannelForHistory(channelId);
+  const handleRevert = (documentId) => {
+    setSelectedDocumentForHistory(documentId);
     setActiveTab('history');
   };
 
-  const handleRevertVersion = async (channelId, version, versionId) => {
+  const handleRevertVersion = async (documentId, version, versionId) => {
     if (!confirm(`Are you sure you want to revert to version ${version}?`)) {
       return;
     }
     try {
       // Use versionId (UUID) if available, otherwise fall back to version number
       const idToUse = versionId || version.toString();
-      await revertVersion(channelId, idToUse);
-      // Refresh channels to get updated data
-      await fetchChannels();
+      await revertVersion(documentId, idToUse);
+      // Refresh documents to get updated data
+      await fetchDocuments();
       alert(`Successfully reverted to version ${version}`);
     } catch (err) {
       console.error('Error reverting version:', err);
@@ -120,11 +120,11 @@ export default function EpimetheusDashboard() {
   };
 
 
-  const handleDeleteChannel = (channelId) => {
+  const handleDeleteDocument = (documentId) => {
     // Note: This only removes from local view. The document will reappear on refresh
     // since there's no delete endpoint in the backend API.
-    if (confirm('Are you sure you want to remove this channel from view?')) {
-      setChannels(prev => prev.filter(ch => ch.id !== channelId));
+    if (confirm('Are you sure you want to remove this document from view?')) {
+      setDocuments(prev => prev.filter(doc => doc.id !== documentId));
     }
   };
 
@@ -178,7 +178,7 @@ export default function EpimetheusDashboard() {
 
             <button 
 
-              onClick={refreshChannels}
+              onClick={refreshDocuments}
 
               disabled={refreshing || loading}
 
@@ -290,7 +290,7 @@ export default function EpimetheusDashboard() {
 
                 <div className="flex-1">
 
-                  <p className="text-white font-medium">Error loading channels</p>
+                  <p className="text-white font-medium">Error loading documents</p>
 
                   <p className="text-sm" style={{ color: '#D1D2D3' }}>{error}</p>
 
@@ -298,7 +298,7 @@ export default function EpimetheusDashboard() {
 
                 <button
 
-                  onClick={fetchChannels}
+                  onClick={fetchDocuments}
 
                   className="text-white px-3 py-1 rounded text-sm font-medium transition-colors hover:opacity-90"
 
@@ -322,7 +322,7 @@ export default function EpimetheusDashboard() {
 
                 <RefreshCw className="w-12 h-12 mx-auto mb-4 animate-spin" style={{ color: '#8B5FBF' }} />
 
-                <p className="text-white">Loading channels...</p>
+                <p className="text-white">Loading documents...</p>
 
               </div>
 
@@ -366,11 +366,11 @@ export default function EpimetheusDashboard() {
 
                 </div>
 
-                <div className="text-3xl font-bold text-white">{channels.length}</div>
+                <div className="text-3xl font-bold text-white">{documents.length}</div>
 
                 <div className="text-sm mt-1" style={{ color: '#9CA3AF' }}>
 
-                  {channels.filter(ch => ch.status === 'active').length} documents
+                  {documents.filter(doc => doc.status === 'active').length} documents
 
                 </div>
 
@@ -390,7 +390,7 @@ export default function EpimetheusDashboard() {
 
                 <div className="text-3xl font-bold text-white">
 
-                  {channels.reduce((sum, ch) => sum + (ch.versions?.length || 0), 0)}
+                  {documents.reduce((sum, doc) => sum + (doc.versions?.length || 0), 0)}
 
                 </div>
 
@@ -402,7 +402,7 @@ export default function EpimetheusDashboard() {
 
             )}
 
-            {/* Channel List */}
+            {/* Document List */}
 
             {!loading && (
 
@@ -410,7 +410,7 @@ export default function EpimetheusDashboard() {
 
               <h2 className="text-xl font-semibold text-white">Active Documents</h2>
 
-              {channels.length === 0 ? (
+              {documents.length === 0 ? (
 
                 <div className="rounded-lg p-12 border text-center" style={{ backgroundColor: '#2C2C2C', borderColor: '#3F0E40' }}>
 
@@ -424,11 +424,11 @@ export default function EpimetheusDashboard() {
 
               ) : (
 
-                channels.map((channel) => (
+                documents.map((document) => (
 
                 <div
 
-                  key={channel.id}
+                  key={document.id}
 
                   className="rounded-lg p-6 border transition-colors hover:opacity-90"
 
@@ -442,13 +442,13 @@ export default function EpimetheusDashboard() {
 
                       <div className="flex items-center gap-3 mb-2">
 
-                        <h3 className="text-lg font-semibold text-white">{channel.name}</h3>
+                        <h3 className="text-lg font-semibold text-white">{document.name}</h3>
 
                         <span className="flex items-center gap-1 text-xs px-2 py-1 rounded-full" style={{ backgroundColor: '#2EB67D20', color: '#2EB67D' }}>
 
                           <CheckCircle className="w-3 h-3" />
 
-                          {channel.status}
+                          {document.status}
 
                         </span>
 
@@ -456,7 +456,7 @@ export default function EpimetheusDashboard() {
 
                       <a 
 
-                        href={channel.docUrl}
+                        href={document.docUrl}
 
                         target="_blank"
 
@@ -478,7 +478,7 @@ export default function EpimetheusDashboard() {
 
                       <button
 
-                        onClick={() => handleForceUpdate(channel.id)}
+                        onClick={() => handleForceUpdate(document.id)}
 
                         className="text-white px-3 py-2 rounded font-medium flex items-center gap-2 transition-colors text-sm hover:opacity-90"
 
@@ -494,7 +494,7 @@ export default function EpimetheusDashboard() {
 
                       <button
 
-                        onClick={() => handleRevert(channel.id)}
+                        onClick={() => handleRevert(document.id)}
 
                         className="text-white px-3 py-2 rounded font-medium flex items-center gap-2 transition-colors text-sm border hover:opacity-80"
 
@@ -510,13 +510,13 @@ export default function EpimetheusDashboard() {
 
                       <button
 
-                        onClick={() => handleDeleteChannel(channel.id)}
+                        onClick={() => handleDeleteDocument(document.id)}
 
                         className="px-3 py-2 rounded font-medium flex items-center gap-2 transition-colors text-sm border hover:opacity-80"
 
                         style={{ backgroundColor: '#E01E5A20', borderColor: '#E01E5A40', color: '#E01E5A' }}
 
-                        title="Remove Channel"
+                        title="Remove Document"
 
                       >
 
@@ -538,11 +538,11 @@ export default function EpimetheusDashboard() {
                         <span className="text-sm" style={{ color: '#D1D2D3' }}>Actions/Changes</span>
                       </div>
                       <span className="text-xl font-bold text-white">
-                        {channel.actionCount || channel.versions?.length || 0}
+                        {document.actionCount || document.versions?.length || 0}
                       </span>
                     </div>
                     <p className="text-xs mt-1" style={{ color: '#9CA3AF' }}>
-                      Document has been updated {channel.actionCount || channel.versions?.length || 0} time{channel.actionCount !== 1 ? 's' : ''}
+                      Document has been updated {document.actionCount || document.versions?.length || 0} time{document.actionCount !== 1 ? 's' : ''}
                     </p>
                   </div>
 
@@ -554,7 +554,7 @@ export default function EpimetheusDashboard() {
 
                       <MessageSquare className="w-4 h-4" />
 
-                      {channel.messageCount} messages tracked
+                      {document.messageCount} messages tracked
 
                     </div>
 
@@ -562,7 +562,7 @@ export default function EpimetheusDashboard() {
 
                       <Clock className="w-4 h-4" />
 
-                      Updated {channel.lastUpdate}
+                      Updated {document.lastUpdate}
 
                     </div>
 
@@ -598,11 +598,11 @@ export default function EpimetheusDashboard() {
 
                 </div>
 
-                {selectedChannelForHistory && (
+                {selectedDocumentForHistory && (
 
                   <button
 
-                    onClick={() => setSelectedChannelForHistory(null)}
+                    onClick={() => setSelectedDocumentForHistory(null)}
 
                     className="flex items-center gap-2 hover:opacity-80"
 
@@ -620,19 +620,19 @@ export default function EpimetheusDashboard() {
 
               </div>
 
-              {!selectedChannelForHistory && channels.length > 0 && (
+              {!selectedDocumentForHistory && documents.length > 0 && (
 
                 <div className="mb-6">
 
                   <label className="block text-sm font-medium mb-2" style={{ color: '#D1D2D3' }}>
 
-                    Filter by Channel
+                    Filter by Document
 
                   </label>
 
                   <select
 
-                    onChange={(e) => setSelectedChannelForHistory(e.target.value ? parseInt(e.target.value, 10) : null)}
+                    onChange={(e) => setSelectedDocumentForHistory(e.target.value || null)}
 
                     className="rounded-lg px-4 py-2 text-white w-full focus:outline-none focus:ring-2"
 
@@ -640,11 +640,11 @@ export default function EpimetheusDashboard() {
 
                   >
 
-                    <option value="">All Channels</option>
+                    <option value="">All Documents</option>
 
-                    {channels.map(ch => (
+                    {documents.map(doc => (
 
-                      <option key={ch.id} value={ch.id}>{ch.name}</option>
+                      <option key={doc.id} value={doc.id}>{doc.name}</option>
 
                     ))}
 
@@ -658,15 +658,15 @@ export default function EpimetheusDashboard() {
 
                 {(() => {
 
-                  const channelsToShow = selectedChannelForHistory
+                  const documentsToShow = selectedDocumentForHistory
 
-                    ? channels.filter(ch => ch.id === selectedChannelForHistory)
+                    ? documents.filter(doc => doc.id === selectedDocumentForHistory)
 
-                    : channels;
+                    : documents;
 
-                  const allVersions = channelsToShow.flatMap(ch =>
+                  const allVersions = documentsToShow.flatMap(doc =>
 
-                    (ch.versions || []).map(v => ({ ...v, channelId: ch.id, channelName: ch.name }))
+                    (doc.versions || []).map(v => ({ ...v, documentId: doc.id, documentName: doc.name }))
 
                   ).sort((a, b) => b.timestamp - a.timestamp);
 
@@ -698,7 +698,7 @@ export default function EpimetheusDashboard() {
 
                           <span className="text-xs" style={{ color: '#9CA3AF' }}>•</span>
 
-                          <span className="text-sm" style={{ color: '#8B5FBF' }}>{version.channelName}</span>
+                          <span className="text-sm" style={{ color: '#8B5FBF' }}>{version.documentName}</span>
 
                         </div>
 
@@ -712,7 +712,7 @@ export default function EpimetheusDashboard() {
 
                       <button
 
-                        onClick={() => handleRevertVersion(version.channelId, version.version, version.versionId)}
+                        onClick={() => handleRevertVersion(version.documentId, version.version, version.versionId)}
 
                         className="text-white px-3 py-1.5 rounded text-sm font-medium transition-colors hover:opacity-90"
 
@@ -806,7 +806,7 @@ export default function EpimetheusDashboard() {
 
                   <p className="pt-2 text-xs" style={{ color: '#9CA3AF' }}>
 
-                    Data is stored locally in your browser. When you connect to the backend, your User ID will be used to sync your channels.
+                    Data is stored locally in your browser. When you connect to the backend, your User ID will be used to sync your documents.
 
                   </p>
 
